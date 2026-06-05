@@ -55,7 +55,7 @@ sequenceDiagram
     User->>PWA: Clicks Login (VK/Google)
     PWA->>OAuth: Request Token (Client-side SDK/Flow)
     OAuth-->>PWA: Access Token
-    PWA->>Server: POST /api/auth/login {provider, token}
+    PWA->>Server: POST /api/auth/{provider}, token
     Server->>OAuth: Verify Token & Get Profile
     OAuth-->>Server: Token Valid + User ID
     Server->>DB: Find or create User mapping (Link providers)
@@ -65,26 +65,14 @@ sequenceDiagram
 
 ### 2.2 Token Refresh Flow (Double Token Pattern)
 
+For a detailed block diagram of the token refresh and authentication lifecycle, please refer to [algorithms/auth.md](algorithms/auth.md).
+
 The architecture utilizes a **Double Token Pattern** to minimize database inquiries and reduce API latency:
 1. **Stateless Access JWT**: Short-lived (e.g., 15 minutes). The server verifies the token cryptographically without executing a database query.
 2. **Stateful Refresh Token**: Long-lived (e.g., 30 days) and stored securely in the PostgreSQL database.
 
-Upon expiration of the short-lived Access JWT, the PWA silently submits the long-lived Refresh Token to obtain a new Access JWT. The server validates the Refresh Token against the database during this transaction, providing a mechanism for account restriction or revocation.
+The refresh backend is called at the every first start of app and upon or just before expiration of the short-lived Access JWT, the PWA silently submits the long-lived Refresh Token to obtain a new Access JWT. The server validates the Refresh Token against the database during this transaction, providing a mechanism for account restriction or revocation.
 
-```mermaid
-sequenceDiagram
-    participant PWA as Angular PWA
-    participant Server as Server (API)
-    participant DB as PostgreSQL
-
-    PWA->>Server: API Request (with expired Access JWT)
-    Server-->>PWA: 401 Unauthorized
-    PWA->>Server: POST /api/auth/refresh {refreshToken}
-    Server->>DB: Validate Refresh Token (exists & not expired/revoked)
-    DB-->>Server: Valid
-    Server-->>PWA: Return New Access JWT (and optionally new Refresh Token)
-    PWA->>Server: Retry original API Request (with NEW Access JWT)
-```
 
 ### 2.3 E2E Encryption & Key Exchange
 
