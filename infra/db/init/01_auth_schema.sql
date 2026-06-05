@@ -1,0 +1,32 @@
+CREATE SCHEMA IF NOT EXISTS __DATABASE_SCHEMA__ AUTHORIZATION __POSTGRES_USER__;
+
+CREATE TABLE __DATABASE_SCHEMA__.users (
+    id BIGSERIAL PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    avatar_url VARCHAR(1024),
+    roles VARCHAR(255),
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE __DATABASE_SCHEMA__.oauth_identities (
+    id BIGSERIAL PRIMARY KEY,
+    user_id BIGINT NOT NULL REFERENCES __DATABASE_SCHEMA__.users(id) ON DELETE CASCADE,
+    provider VARCHAR(50) NOT NULL,
+    provider_user_id VARCHAR(255) NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (provider, provider_user_id)
+);
+
+CREATE TABLE __DATABASE_SCHEMA__.refresh_tokens (
+    id BIGSERIAL PRIMARY KEY,
+    token VARCHAR(512) NOT NULL UNIQUE,
+    session_id VARCHAR(36) NOT NULL UNIQUE,
+    user_id BIGINT NOT NULL REFERENCES __DATABASE_SCHEMA__.users(id) ON DELETE CASCADE,
+    expiry_date TIMESTAMP WITH TIME ZONE NOT NULL,
+    revoked BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Indexes for performance
+CREATE INDEX idx_oauth_identities_user_id ON __DATABASE_SCHEMA__.oauth_identities(user_id);
+CREATE INDEX idx_refresh_tokens_user_id ON __DATABASE_SCHEMA__.refresh_tokens(user_id);

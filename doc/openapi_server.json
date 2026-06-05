@@ -1,0 +1,270 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Fourletters API - Authentication",
+    "version": "1.0.0",
+    "description": "Authentication endpoints for the fourletters messenger Hub."
+  },
+  "servers": [
+    {
+      "url": "http://localhost:8080/server/api/v1",
+      "description": "Local Hub Development Server"
+    }
+  ],
+  "tags": [
+    {
+      "name": "Auth",
+      "description": "Authentication and Identity Management"
+    }
+  ],
+  "paths": {
+    "/auth/vk": {
+      "post": {
+        "tags": ["Auth"],
+        "summary": "Login using VK OAuth token",
+        "operationId": "loginVk",
+        "security": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AuthRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successfully authenticated",
+            "headers": {
+              "Set-Cookie": {
+                "description": "HttpOnly cookie containing the 'refresh_token'.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid token, User not found"
+          }
+        }
+      }
+    },
+    "/auth/google": {
+      "post": {
+        "tags": ["Auth"],
+        "summary": "Login using Google OAuth token",
+        "operationId": "loginGoogle",
+        "security": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AuthRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successfully authenticated",
+            "headers": {
+              "Set-Cookie": {
+                "description": "HttpOnly cookie containing the 'refresh_token'.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid token, User not found"
+          }
+        }
+      }
+    },
+    "/auth/refresh": {
+      "post": {
+        "tags": ["Auth"],
+        "summary": "Refresh Access Token",
+        "description": "Consumes the HttpOnly Refresh Token cookie to issue a new Access Token without requiring re-authentication.",
+        "operationId": "refreshToken",
+        "security": [
+          {
+            "CookieRefreshAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-Session-ID",
+            "in": "header",
+            "required": true,
+            "description": "The current session ID. **Note:** This value must match the `jti` (JWT ID) claim of your current access token.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "New access token granted",
+            "headers": {
+              "Set-Cookie": {
+                "description": "HttpOnly cookie containing the 'refresh_token'.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Refresh token is invalid, expired, or missing"
+          }
+        }
+      }
+    },
+    "/auth/logout": {
+      "post": {
+        "tags": ["Auth"],
+        "summary": "Logout the current user",
+        "description": "Invalidates the refresh token by sessionId and clears the HttpOnly cookie.",
+        "operationId": "logout",  
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],    
+        "responses": {
+          "200": {
+            "description": "Successfully logged out",
+            "headers": {
+              "Set-Cookie": {
+                "description": "Clears the HttpOnly refresh token cookie",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/auth/user": {
+      "get": {
+        "tags": ["Auth"],
+        "summary": "Get Current User Profile",
+        "operationId": "getCurrentUser",
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current user profile information",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized - Missing or invalid access token"
+          },
+		  "404": {
+            "description": "User not found"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "BearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT"
+      },
+      "CookieRefreshAuth": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "refresh_token" 
+      }
+    },
+    "schemas": {
+      "AuthRequest": {
+        "type": "object",
+        "required": ["token"],
+        "properties": {
+          "token": {
+            "type": "string",
+            "description": "The identity token provided by the third-party OAuth provider."
+          }
+        }
+      },
+      "AuthResponse": {
+        "type": "object",
+        "required": ["access_token", "user"],
+        "properties": {
+          "access_token": {
+            "type": "string",
+            "description": "The short-lived JWT Access Token."
+          },
+          "user": {
+            "$ref": "#/components/schemas/UserResponse"
+          }
+        }
+      },
+      "UserResponse": {
+        "type": "object",
+        "required": ["id", "username", "roles"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "username": {
+            "type": "string"
+          },
+          "avatarUrl": {
+            "type": "string",
+            "format": "uri"
+          },
+          "roles": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "List of user permissions/roles for RBAC."
+          }
+        }
+      }
+    }
+  }
+}
