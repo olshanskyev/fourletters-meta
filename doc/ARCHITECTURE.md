@@ -168,7 +168,7 @@ sequenceDiagram
 ### 4.1 Horizontal Scaling & Load Balancing (Centralized)
 The split architecture naturally dictates two distinct load balancing strategies for the Control Plane (Server) and Data Plane (Hub):
 
-1. **Server (REST HTTP Traffic):** The Server instances are stateless HTTP nodes. An API Gateway or standard Load Balancer (like Nginx, HAProxy, or AWS ALB) routes `/api/*` traffic across the Server cluster using Round-Robin.
+1. **Server (REST HTTP Traffic):** The Server instances are stateless HTTP nodes. An API Gateway or standard Load Balancer (like Nginx, HAProxy, or AWS ALB) routes `/server/api/*` traffic across the Server cluster using Round-Robin.
 2. **Hub (WebSocket Traffic):** Hubs maintain long-lived stateful TCP connections. The Load Balancer terminates SSL and routes WebSocket upgrade requests to backend Hub instances. Since RabbitMQ acts as the unified backplane, sticky sessions are NOT required. A "Least Connections" load balancing algorithm is seamlessly supported and highly recommended here to evenly distribute long-lived WebSocket connections as nodes scale up or down.
 
 ```mermaid
