@@ -21,6 +21,7 @@ flowchart TD
     Client -->|Request Token| OAuth
     Server -->|Verify Token| OAuth
     Server -->|Read/Write| DB
+    Hub -->|Fetch Key config via JWKS| Server
     Hub -->|Pub/Sub| MQ
     MQ -->|Pub/Sub| Hub
     Server -->|Consume DLQ| MQ
@@ -32,7 +33,7 @@ flowchart TD
 ### Components
 *   **Angular PWA:** The user interface. Uses WebCrypto for E2E encryption and IndexedDB for local storage of messages and keys.
 *   **Server (Spring Boot):** The control plane. Handles OAuth linking, validates identity, manages public keys, stores offline messages (store-and-forward), and triggers push notifications.
-*   **Hub (Lightweight Spring Boot):** The data plane. A blind proxy that evaluates stateless JWTs (using the Server's public key) to authorize connections. Routes E2E encrypted WebSocket payloads directly into RabbitMQ. Has no database access, which minimizes resource consumption and attack surface.
+*   **Hub (Lightweight Spring Boot):** The data plane. A blind proxy that evaluates stateless JWTs to authorize connections. It dynamically fetches the Server's public key via a JWKS (JSON Web Key Set) endpoint to verify the cryptographic signatures. Routes E2E encrypted WebSocket payloads directly into RabbitMQ. Has no database access, which minimizes resource consumption and attack surface.
 *   **PostgreSQL:** Stores user accounts, OAuth linking, Public Keys, and acts as the persistent store for the "Store-and-Forward" offline message mechanism.
 *   **RabbitMQ:** Message broker for resilient, asynchronous internal message delivery and buffering.
 
@@ -68,7 +69,7 @@ sequenceDiagram
 For a detailed block diagram of the token refresh and authentication lifecycle, please refer to [algorithms/auth.md](algorithms/auth.md).
 
 The architecture utilizes a **Double Token Pattern** to minimize database inquiries and reduce API latency:
-1. **Stateless Access JWT**: Short-lived (e.g., 15 minutes). The server verifies the token cryptographically without executing a database query.
+1. **Stateless Access JWT**: Short-lived (e.g., 15 minutes). Both the Server and Hub verify the token cryptographically without executing a database query.
 2. **Stateful Refresh Token**: Long-lived (e.g., 30 days) and stored securely in the PostgreSQL database.
 
 The refresh backend is called at the every first start of app and upon or just before expiration of the short-lived Access JWT, the PWA silently submits the long-lived Refresh Token to obtain a new Access JWT. The server validates the Refresh Token against the database during this transaction, providing a mechanism for account restriction or revocation.
@@ -101,6 +102,8 @@ sequenceDiagram
 ```
 
 ### 2.4 Message Sending & Receiving (Store-and-Forward)
+
+For a detailed block diagram of the RabbitMQ Exchange topology and how holding queues mitigate database operations, please refer to [algorithms/rabbitmq-exchange.md](algorithms/rabbitmq-exchange.md).
 
 To guarantee message delivery across unreliable network conditions while minimizing database writes, the system implements a **Holding Queue Pattern** utilizing RabbitMQ's Alternate Exchange, TTL, and Dead Letter Queue (DLQ) mechanics. When a receiving client is offline, a push notification is triggered instantly, but the encrypted payload is held temporarily in RabbitMQ for 30 seconds. It is only persisted to the database if the user fails to open the app within that grace period.
 
@@ -206,7 +209,7 @@ To further scale and reduce infrastructure costs, this architecture supports a *
 
 **Separation of Concerns:**
 *   **Core Infrastructure:** Hosts the PostgreSQL database, `Server` application (Auth, Key Directory, Store-and-Forward), Main RabbitMQ cluster, and at least some fallback `Hub` instances.
-*   **Volunteer Infrastructure:** Volunteers run only the `fourletters-hub` application. It only requires connection credentials to the Main RabbitMQ cluster. It does not require database access or secrets. To validate a user's JWT, they verify the cryptographic signature using a shared public key (Stateless validation).
+*   **Volunteer Infrastructure:** Volunteers run only the `fourletters-hub` application. It only requires connection credentials to the Main RabbitMQ cluster. It does not require database access or secrets. To validate a user's JWT, they fetch the Server's public keys via its JWKS endpoint and verify the cryptographic signature (Stateless validation).
 
 Because messages are strictly E2E encrypted and hubs lack DB credentials, volunteer nodes act purely as blind data proxies, shielding both the volunteer (from liability/database setup) and the users (from data snooping).
 

@@ -1,0 +1,110 @@
+{
+  "asyncapi": "2.6.0",
+  "info": {
+    "title": "Fourletters API - Hub (WebSocket)",
+    "version": "1.0.0",
+    "description": "Hub endpoints for WebSocket routing and E2E message delivery"
+  },
+  "servers": {
+    "hub": {
+      "url": "ws://localhost:8081/hub/api/v1",
+      "protocol": "ws",
+      "description": "Local Hub WebSocket Server",
+      "security": [
+        {
+          "BearerAuth": []
+        }
+      ]
+    }
+  },
+  "channels": {
+    "/ws": {
+      "description": "Main WebSocket channel for the fourletters Hub.",
+      "bindings": {
+        "ws": {
+          "query": {
+            "type": "object",
+            "properties": {
+              "token": {
+                "type": "string",
+                "description": "Stateless Access JWT for authentication"
+              }
+            }
+          }
+        }
+      },
+      "publish": {
+        "summary": "Client sends a message to the Hub",
+        "operationId": "sendToHub",
+        "message": {
+          "oneOf": [
+            { "$ref": "#/components/messages/SendMessage" },
+            { "$ref": "#/components/messages/AckMessage" }
+          ]
+        }
+      },
+      "subscribe": {
+        "summary": "Client receives a message from the Hub",
+        "operationId": "receiveFromHub",
+        "message": {
+          "oneOf": [
+            { "$ref": "#/components/messages/ReceiveMessage" },
+            { "$ref": "#/components/messages/MessageDispatched" },
+            { "$ref": "#/components/messages/MessageRead" }
+          ]
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "BearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT"
+      }
+    },
+    "messages": {
+      "SendMessage": {
+        "name": "SendMessage",
+        "title": "Send Encrypted Message",
+        "summary": "Action wrapper to send an encrypted message over WS",
+        "payload": {
+          "$ref": "./models.json#/components/schemas/SendMessagePayload"
+        }
+      },
+      "ReceiveMessage": {
+        "name": "ReceiveMessage",
+        "title": "Receive Encrypted Message",
+        "summary": "Event wrapper pushed by the Server containing an encrypted message",
+        "payload": {
+          "$ref": "./models.json#/components/schemas/ReceiveMessagePayload"
+        }
+      },
+      "AckMessage": {
+        "name": "AckMessage",
+        "title": "Message Acknowledgement",
+        "summary": "Acknowledge receipt of a message for the Store-and-Forward mechanism",
+        "payload": {
+          "$ref": "./models.json#/components/schemas/AckMessagePayload"
+        }
+      },
+      "MessageDispatched": {
+        "name": "MessageDispatched",
+        "title": "Message Dispatched Receipt",
+        "summary": "Event wrapper indicating the Hub successfully sent the message to the Message Broker",
+        "payload": {
+          "$ref": "./models.json#/components/schemas/MessageDispatchedPayload"
+        }
+      },
+      "MessageRead": {
+        "name": "MessageRead",
+        "title": "Message Read Receipt",
+        "summary": "Event wrapper indicating the recipient has read the message",
+        "payload": {
+          "$ref": "./models.json#/components/schemas/MessageReadPayload"
+        }
+      }
+    }
+  }
+}

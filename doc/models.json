@@ -90,7 +90,70 @@
             "description": "ID of the message being acknowledged"
           }
         }
-      }
+      },
+      "SendMessagePayload": {
+        "type": "object",
+        "required": ["action", "data"],
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": ["sendMessage"]
+          },
+          "data": {
+            "$ref": "#/components/schemas/EncryptedMessage"
+          }
+        }
+      },
+      "ReceiveMessagePayload": {
+        "type": "object",
+        "required": ["event", "data"],
+        "properties": {
+          "event": {
+            "type": "string",
+            "enum": ["messageReceived"]
+          },
+          "data": {
+            "$ref": "#/components/schemas/EncryptedMessage"
+          }
+        }
+      },
+      "AckMessagePayload": {
+        "type": "object",
+        "required": ["action", "data"],
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": ["ackMessage"]
+          },
+          "data": {
+            "$ref": "#/components/schemas/MessageAcknowledgement"
+          }
+        }      },
+      "MessageDispatchedPayload": {
+        "type": "object",
+        "required": ["event", "data"],
+        "properties": {
+          "event": {
+            "type": "string",
+            "example": "messageDispatched"
+          },
+          "data": {
+            "$ref": "#/components/schemas/MessageAcknowledgement"
+          }
+        }
+      },
+      "MessageReadPayload": {
+        "type": "object",
+        "required": ["event", "data"],
+        "properties": {
+          "event": {
+            "type": "string",
+            "example": "messageRead"
+          },
+          "data": {
+            "$ref": "#/components/schemas/MessageAcknowledgement"
+          }
+        }      }
     }
   }
 }
