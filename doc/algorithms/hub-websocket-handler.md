@@ -1,106 +1,88 @@
 # Hub WebSocket Handler Logic
 
-This document maps out the specific execution logic inside the `HubWebSocketHandler`, detailing the responsibilities of the Hub as an intermediary between the Angular PWA Client and the RabbitMQ Broker.
+This document maps out the execution logic inside the `HubWebSocketHandler`. In the fourletters architecture the Hub is a **receive-only live relay**: it pushes already-accepted, E2E-encrypted payloads from RabbitMQ to the recipient's WebSocket. It never accepts message sends, never owns durability, and never inspects or transforms payloads.
 
-It illustrates how the Hub handles incoming WebSocket messages from the client (`sendMessage`, `ackMessage`), how it handles incoming RabbitMQ payloads, event transformations, manual acknowledgements, and failure-scenario timeouts.
+For the surrounding context see [2.4 Message Sending & Receiving](../ARCHITECTURE.md#24-message-sending--receiving-server-owned-inbox) and [2.5 Delivery Guarantee](../ARCHITECTURE.md#25-delivery-guarantee-server-retained-copy--signed-receipt) in the architecture document, and the [RabbitMQ topology](rabbitmq-exchange.md) for object ownership.
 
 ## Core Responsibilities
-1. **Security / Identity:** Validates the JWT (via Principal) and strictly overrides the `senderId` on outgoing messages to prevent spoofing.
-2. **Event Transformation:** Translates client "Actions" (intentions) into "Events" (notifications) for the receiving client.
-   - `action: sendMessage` ➔ `event: messageReceived`
-   - `action: ackMessage` ➔ `event: messageRead`
-3. **Guaranteed Delivery:** Employs Manual ACKs and Timeout Timers to ensure messages are not deleted from RabbitMQ until the PWA definitively acknowledges them.
+1. **Registration:** on boot the Hub authenticates to the Server and receives its queue name `hub.queue.{hubId}`, then begins consuming. The Hub has **no permission to declare queues** — the Server provisions the queue (see [RabbitMQ topology](rabbitmq-exchange.md#object-ownership--lifecycle)).
+2. **Connection authorization & presence:** on a client WebSocket connect, the Hub validates the client's **Access JWT** (the short-lived access token, verified cryptographically via the Server's JWKS — no DB lookup) and then **binds `user.{id}`** to its queue. On disconnect it **unbinds**. A binding therefore *is* live presence.
+3. **Live relay:** the Hub consumes a payload from its queue, looks up the local WebSocket session for the target user, and pushes the **opaque** payload over the socket.
 
-## Handling Missing DTO Data (The `senderId` Issue)
-*Note:* For read-receipts (`messageRead`) to be successfully forwarded back to the original sender via RabbitMQ, the Hub needs to know the original target `senderId`. Since the Hub operates statelessly (reconnections wipe memory map caches), the `AckMessagePayload` / `ClientMessageAck` DTO passed from the client *must* contain the target `senderId` (the user who sent the original message). Once the Hub uses this target routing key to securely inject the message into RabbitMQ, it **transforms the data natively into the `EventMessageReceipt` DTO schema**, which naturally ignores the sender and structures the payload correctly for the WebSocket client mapping!
+## What the Hub does NOT do
+
+The Hub is intentionally a dumb pipe. The following responsibilities live elsewhere:
+
+- **It does not accept `sendMessage`.** Clients send by `POST`ing to the **Server** over HTTPS; sending never transits a Hub.
+- **It does not handle delivery/read receipts.** The recipient sends **signed** receipts **directly to the Server** over HTTPS, out of band from the Hub.
+- **It does not inject `senderId` or guard against spoofing.** Sender identity is bound by the **Server** at send time, and payloads are **signed end-to-end** by the sender's identity key (verified by the recipient against the key directory).
+- **It does not transform actions into events.** Payloads are opaque; any event semantics (e.g. a "read" notification) are produced by the **Server** before it publishes.
+- **It does not provide durability.** RabbitMQ is non-durable live fan-out. A missed live delivery is recovered by the Server's `GET /api/inbox?since=<seq>` sync — there is **no 10s ACK timer and no store-and-forward**.
+
+## Identity & Forwarding
+
+The Hub treats every consumed payload as an **opaque envelope** addressed by routing key `user.{id}`. It maintains a local map `{id} → WebSocket session`, and on consume it writes the frame to the matching session without reading or modifying the ciphertext. Because the Hub **never publishes** to `messages.exchange`, it cannot inject or alter sender identity at all; spoofing is prevented upstream (Server identity binding) and end-to-end (sender signature).
+
+## Acknowledgement Model
+
+The Hub consumes with **manual ack** and acks RabbitMQ once the payload has been written to the client's WebSocket. If the target user has **no live session** (e.g. it just disconnected) or the write fails, the Hub simply **discards the delivery (ack-and-drop)**. Nothing is lost: the Server retains the copy until it receives a signed receipt, otherwise flushes it to the durable inbox, and the client pulls it on reconnect via `GET /api/inbox?since=<seq>`. There are no timers and no nack-to-store-and-forward, because the delivery guarantee lives entirely in the Server, not in the Hub or the broker.
+
+## Example: Read Receipts Are Server-Driven
+
+To illustrate the Hub's content-agnostic role: when Bob reads a message, Bob's client `POST`s a **signed `read` receipt to the Server** (HTTPS, *not* the Hub). The Server records it and **publishes `user.alice`** carrying the read event. Alice's Hub consumes `user.alice` and pushes it to Alice's WebSocket exactly like any other payload — the Hub neither generated nor understood the event.
 
 ---
 
 ## Block Algorithm
 
-Below is the step-by-step sequential flowchart illustrating a message flying from Client 1, passing through the backend logic, reaching Client 2, and generating a Read Receipt back to Client 1.
+Below is the flowchart of the Hub's logic: bootstrap, per-connection authorization/presence, and the live relay path. Sending and receipts (dotted) bypass the Hub entirely.
+
 
 ```mermaid
 flowchart TD
-    subgraph Client1 [Client 1 - Sender]
-        C1_Send([Send action: sendMessage])
-        C1_Dispatch([Receive event: messageDispatched])
-        C1_Read([Receive event: messageRead])
+    subgraph Boot [Hub bootstrap]
+        B1[Authenticate to Server]
+        B2[Receive queue name hub.queue.hubId]
+        B3[Start consuming own queue]
     end
 
-    subgraph Hub1 [Hub - Sender Side]
-        H1_Process[Validate identity<br/>Inject senderId = Client 1]
-        H1_Transform[Transform action to event:<br/>sendMessage -> messageReceived]
-        H1_Publish[Publish to RabbitMQ<br/>Routing Key: user.Client2]
-        H1_LocalAck[Auto-reply messageDispatched<br/>via WS]
-
-        H1_RxAck[Receive event: messageRead from MQ]
-        H1_MqAck[MQ basicAck immediately]
-        H1_SendReadWS[Send exact JSON<br/>to Client 1 via WS]
+    subgraph ClientConn [Client connection lifecycle]
+        L1[Client opens WebSocket]
+        L2{Validate JWT via JWKS}
+        LX[Reject and close WS]
+        L3[Bind user.id to hub queue]
+        L4[Register local session: id to WS]
+        L5[On disconnect: unbind user.id and drop session]
     end
 
-    subgraph RabbitMQ [RabbitMQ System]
-        MQ_CheckRoute{Is Client 2 bounding<br/>to messages.exchange?}
-        MQ_DLX[Route to Alternate Exchange<br/>Store-and-Forward Flow]
-        MQ_RouteToC2[Route to Client 2 Hub Queue]
-        MQ_RouteToC1[Route to Client 1 Hub Queue]
+    subgraph Relay [Live relay path]
+        R1[Consume payload from hub.queue.hubId]
+        R2[Read target user.id from routing key]
+        R3{Local WS session for id?}
+        R4[Write opaque payload to client WS]
+        R5[basicAck to RabbitMQ]
+        R6[Ack-and-drop<br/>Server /inbox recovers it]
     end
 
-    subgraph Hub2 [Hub - Receiver Side]
-        H2_Receive[Receive messageReceived<br/>from RabbitMQ]
-        H2_SetTimer[Store deliveryTag<br/>Start 10s ACK Timer]
-        H2_SendClient[Send exact JSON<br/>to Client 2 via WS]
+    ServerPub[[Server publishes user.id]]
 
-        H2_RxClientAck[Receive action: ackMessage]
-        H2_Confirm[MQ basicAck<br/>Cancel 10s Timer]
-        H2_TransformAck[Transform action to event:<br/>ackMessage -> messageRead]
-        H2_FwdAck[Publish to MQ RK: user.Client1]
+    %% Bootstrap
+    B1 --> B2 --> B3
 
-        H2_TimerExpire([10s Timer Expires or<br/>Client Disconnects])
-        H2_Nack[MQ basicNack<br/>Drops to Store-and-Forward]
-    end
+    %% Connection lifecycle
+    L1 --> L2
+    L2 -- invalid --> LX
+    L2 -- valid --> L3 --> L4
+    L4 -.->|later| L5
 
-    subgraph Client2 [Client 2 - Receiver]
-        C2_Receive([Receive event: messageReceived])
-        C2_SendAck([Send action: ackMessage])
-    end
+    %% Relay
+    ServerPub --> R1
+    R1 --> R2 --> R3
+    R3 -- yes --> R4 --> R5
+    R3 -- no / write fails --> R6
 
-    %% Flow: Sending
-    C1_Send --> H1_Process
-    H1_Process --> H1_Transform
-    H1_Transform --> H1_Publish
-    H1_Publish --> H1_LocalAck
-    H1_LocalAck --> C1_Dispatch
-
-    %% Flow: Routing to Client 2
-    H1_Publish --> MQ_CheckRoute
-    MQ_CheckRoute -- No Offline --> MQ_DLX
-    MQ_CheckRoute -- Yes Online --> MQ_RouteToC2
-
-    %% Flow: Delivery
-    MQ_RouteToC2 --> H2_Receive
-    H2_Receive --> H2_SetTimer
-    H2_SetTimer --> H2_SendClient
-    H2_SendClient --> C2_Receive
-
-    %% Flow: Acknowledgment
-    C2_Receive -->|Processes & Reads| C2_SendAck
-    C2_SendAck --> H2_RxClientAck
-    H2_RxClientAck --> H2_Confirm
-    H2_RxClientAck --> H2_TransformAck
-    H2_TransformAck --> H2_FwdAck
-
-    %% Flow: Return Read Receipt Route
-    H2_FwdAck --> MQ_RouteToC1
-    MQ_RouteToC1 --> H1_RxAck
-    H1_RxAck --> H1_MqAck
-    H1_RxAck --> H1_SendReadWS
-    H1_SendReadWS --> C1_Read
-
-    %% Failure Logic
-    H2_SetTimer -.-> H2_TimerExpire
-    H2_TimerExpire -.-> H2_Nack
 ```
+
 
 
 

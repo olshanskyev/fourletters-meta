@@ -57,7 +57,7 @@
       },
       "EncryptedMessage": {
         "type": "object",
-        "required": ["messageId", "recipientId", "payload"],
+        "required": ["messageId", "recipientId", "payload", "signature"],
         "properties": {
           "messageId": {
             "type": "string",
@@ -72,57 +72,102 @@
           "senderId": {
             "type": "string",
             "format": "uuid",
-            "description": "ID of the sender user (populated by the Hub before delivery)"
+            "description": "ID of the sender user. Set by the Server from the authenticated session at send time; any client-provided value is ignored. Omitted in the send request."
+          },
+          "seq": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Per-recipient monotonic sequence number assigned by the Server on accept. Present on delivered/inbox messages; omitted in the send request."
           },
           "payload": {
             "type": "string",
             "description": "E2E encrypted message payload (Base64)"
+          },
+          "signature": {
+            "type": "string",
+            "description": "Detached signature over the payload produced by the sender's identity key (Base64). Verified end-to-end by the recipient against the public-key directory."
           }
         }
       },
-      "ClientMessageAck": {
+      "AcceptedResponse": {
         "type": "object",
-        "required": ["messageId", "senderId"],
+        "required": ["messageId", "seq", "status"],
         "properties": {
           "messageId": {
             "type": "string",
             "format": "uuid",
-            "description": "ID of the message being acknowledged"
+            "description": "ID of the accepted message (echoed from the request)."
           },
-          "senderId": {
+          "seq": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Per-recipient sequence number assigned by the Server."
+          },
+          "status": {
             "type": "string",
-            "format": "uuid",
-            "description": "ID of the user who originally sent the message (used for returning the read receipt)"
+            "enum": ["accepted"],
+            "description": "The Server has durably taken ownership of the message."
           }
         }
       },
-      "EventMessageReceipt": {
+      "InboxResponse": {
         "type": "object",
-        "required": ["messageId"],
+        "required": ["messages", "lastSeq"],
+        "properties": {
+          "messages": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EncryptedMessage"
+            },
+            "description": "Undelivered messages with seq greater than the requested 'since', ordered by seq ascending."
+          },
+          "lastSeq": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Highest sequence number the Server has accepted for this recipient. Lets the client detect gaps versus what it received live."
+          }
+        }
+      },
+      "DeliveryReceipt": {
+        "type": "object",
+        "required": ["messageId", "type", "signature"],
         "properties": {
           "messageId": {
             "type": "string",
             "format": "uuid",
-            "description": "ID of the outgoing message that triggered the event (dispatch or read)"
-          }
-        }
-      },
-      "SendMessagePayload": {
-        "type": "object",
-        "required": ["action", "data"],
-        "properties": {
-          "action": {
-            "type": "string",
-            "enum": ["sendMessage"]
+            "description": "ID of the message being acknowledged."
           },
-          "data": {
-            "$ref": "#/components/schemas/EncryptedMessage"
+          "type": {
+            "type": "string",
+            "enum": ["delivered", "read"],
+            "description": "'delivered' = the recipient device received and decrypted it; 'read' = the user opened it."
+          },
+          "signature": {
+            "type": "string",
+            "description": "Signature over (messageId, type) by the recipient's identity key (Base64). Lets the Server and the original sender trust the receipt without trusting any Hub."
           }
         }
       },
-      "ReceiveMessagePayload": {
+      "ReceiptData": {
+        "type": "object",
+        "required": ["messageId", "recipientId"],
+        "properties": {
+          "messageId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "ID of the original message this receipt refers to."
+          },
+          "recipientId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "ID of the user who delivered/read the message (the original recipient)."
+          }
+        }
+      },      
+      "MessageEvent": {
         "type": "object",
         "required": ["event", "data"],
+        "description": "WS push: a new encrypted message relayed live by the Hub.",
         "properties": {
           "event": {
             "type": "string",
@@ -133,43 +178,20 @@
           }
         }
       },
-      "AckMessagePayload": {
-        "type": "object",
-        "required": ["action", "data"],
-        "properties": {
-          "action": {
-            "type": "string",
-            "enum": ["ackMessage"]
-          },
-          "data": {
-            "$ref": "#/components/schemas/ClientMessageAck"
-          }
-        }      },
-      "MessageDispatchedPayload": {
+      "ReceiptEvent": {
         "type": "object",
         "required": ["event", "data"],
+        "description": "WS push: a delivery/read notification relayed live to the original sender.",
         "properties": {
           "event": {
             "type": "string",
-			      "enum": ["messageDispatched"]
+            "enum": ["messageDelivered", "messageRead"]
           },
           "data": {
-            "$ref": "#/components/schemas/EventMessageReceipt"
+            "$ref": "#/components/schemas/ReceiptData"
           }
         }
-      },
-      "MessageReadPayload": {
-        "type": "object",
-        "required": ["event", "data"],
-        "properties": {
-          "event": {
-            "type": "string",
-			      "enum": ["messageRead"]
-          },
-          "data": {
-            "$ref": "#/components/schemas/EventMessageReceipt"
-          }
-        }      }
+      }
     }
   }
 }
