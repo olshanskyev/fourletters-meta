@@ -9,9 +9,10 @@ For a high-level overview of the user identification process, refer to [2.1 Auth
 - **Session ID (`sessionId`):** Stored in local storage.
 - **Refresh Token:** Stored securely as an `HttpOnly` cookie.
 
-## Edge Cases & Concurrency
+## Edge Cases & Concurrency (ToDo)
 - **Strict Rotation & Grace Period:** Currently, strict rotation is enforced (only one active refresh token per session is valid at a time). In rare multi-tab scenarios, concurrent refresh requests might lead to a 401 Unauthorized for the slower tab, which is acceptable from a strict security standpoint. However, for a better User Experience, a short **grace period** may be implemented on the backend to temporarily accept a recently invalidated refresh token to gracefully handle concurrent multi-tab refreshes.
 - **Database Cleanup:** Orphaned session entries (e.g., created during concurrent multi-tab refreshes or missed logouts) are not permanently leaked. A backend scheduled job automatically cleans up expired refresh tokens from the database.
+- **XSS & Session ID Manipulation:** If an attacker executes a Cross-Site Scripting (XSS) attack and alters the `sessionId` stored in local storage, the next token refresh attempt will fail. The server will reject the request due to a mismatch between the `HttpOnly` refresh token cookie and the altered `sessionId`. This causes an automatic logout (a targeted Denial of Service), but successfully prevents session hijacking, as the attacker cannot access the `HttpOnly` cookie.
 
 ## Block Algorithm
 
@@ -25,21 +26,21 @@ flowchart TD
         CheckSession{Is sessionId in<br/>local storage?}
         GoToLogin([Redirect to login page])
         SendRefresh[Send refresh token request<br/>Cookie: refresh_token<br/>Header: X-Session-ID = sessionId]
-        
+
         Gui_CheckSuccess[Check response: Success]
         Gui_SaveToken[Read sessionId from AuthResponse.accessToken<br/>Save to local storage]
         Gui_NormalCall([User uses accessToken for<br/>regular calls as Bearer token])
-        
+
         Gui_CheckFail[Check response: Error/401]
         Gui_ClearToken[Clear accessToken]
         Gui_Is401{Is it 401 Error?}
         Gui_ClearSession[Clear sessionId]
         Gui_SkipClearSession[Keep sessionId]
         GoToLogin2([Redirect to login page])
-        
+
         Gui_Logout([User clicks logout])
         Gui_SendLogout[Send logout request<br/>Header: Authorization]
-        
+
         Gui_ClearAll[Clear access token and sessionId]
         GoToLogin3([Redirect to login page])
     end
@@ -50,7 +51,7 @@ flowchart TD
         BE_Success[Generate new sessionId<br/>Set jti = sessionId in JWTs]
         BE_ReturnSuccess[Return AuthResponse<br/>Cookie: refresh_token]
         BE_ReturnFail[Return 401 Unauthorized<br/>Set cookie to remove refresh_token]
-        
+
         BE_CheckLogout[Check access token<br/>Ignore expiration]
         BE_DeleteToken[Delete token from DB<br/>by sessionId from access token]
         BE_ReturnLogout[Return Success]
@@ -60,7 +61,7 @@ flowchart TD
     Start --> CheckSession
     CheckSession -- No --> GoToLogin
     CheckSession -- Yes --> SendRefresh
-    
+
     %% Step 4-5
     SendRefresh --> BE_Check
     BE_Check -- Yes --> BE_Success
@@ -80,13 +81,13 @@ flowchart TD
     Gui_Is401 -- No (Server Unavailable) --> Gui_SkipClearSession
     Gui_ClearSession --> GoToLogin2
     Gui_SkipClearSession --> GoToLogin2
-    
+
     %% Step 8
     Gui_Logout --> Gui_SendLogout
     Gui_SendLogout --> BE_CheckLogout
     BE_CheckLogout --> BE_DeleteToken
     BE_DeleteToken --> BE_ReturnLogout
-    
+
     BE_ReturnLogout --> Gui_ClearAll
     Gui_ClearAll --> GoToLogin3
 ```

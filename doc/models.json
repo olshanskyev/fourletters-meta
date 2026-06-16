@@ -80,14 +80,30 @@
           }
         }
       },
-      "MessageAcknowledgement": {
+      "ClientMessageAck": {
+        "type": "object",
+        "required": ["messageId", "senderId"],
+        "properties": {
+          "messageId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "ID of the message being acknowledged"
+          },
+          "senderId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "ID of the user who originally sent the message (used for returning the read receipt)"
+          }
+        }
+      },
+      "EventMessageReceipt": {
         "type": "object",
         "required": ["messageId"],
         "properties": {
           "messageId": {
             "type": "string",
             "format": "uuid",
-            "description": "ID of the message being acknowledged"
+            "description": "ID of the outgoing message that triggered the event (dispatch or read)"
           }
         }
       },
@@ -126,7 +142,7 @@
             "enum": ["ackMessage"]
           },
           "data": {
-            "$ref": "#/components/schemas/MessageAcknowledgement"
+            "$ref": "#/components/schemas/ClientMessageAck"
           }
         }      },
       "MessageDispatchedPayload": {
@@ -135,10 +151,10 @@
         "properties": {
           "event": {
             "type": "string",
-            "example": "messageDispatched"
+			      "enum": ["messageDispatched"]
           },
           "data": {
-            "$ref": "#/components/schemas/MessageAcknowledgement"
+            "$ref": "#/components/schemas/EventMessageReceipt"
           }
         }
       },
@@ -148,10 +164,10 @@
         "properties": {
           "event": {
             "type": "string",
-            "example": "messageRead"
+			      "enum": ["messageRead"]
           },
           "data": {
-            "$ref": "#/components/schemas/MessageAcknowledgement"
+            "$ref": "#/components/schemas/EventMessageReceipt"
           }
         }      }
     }
