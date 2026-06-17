@@ -177,16 +177,16 @@ A freshly `accepted` message lives only in the hot tier until the hold-window fl
 
 **Algorithm:**
 1. **On app start** — call `GET /inbox` and save `serverStartedAt` to `localStorage`.
-2. **On opening a chat** — for each `undelivered` message with `retryCount == 0`, compare the `serverStartedAt` stored *on the message* (captured from its `accepted` response) against the one in `localStorage`.
-3. **If they differ** — the Server restarted after the message was accepted → resend it once (`POST /messages`, same `messageId`), set `retryCount = 1`; otherwise leave it.
+2. **After `GET /inbox`** — for each `undelivered` message with `retryCount == 0`, compare the `serverStartedAt` stored *on the message* (captured from its `accepted` response) against the one in `localStorage`.
+3. **If they differ** — mark for resync and resend all not delivered once (`POST /messages/batch`), set `retryCount = 1`; otherwise leave it.
 
 ```mermaid
 flowchart TD
     Start([App start]) --> Inbox["GET /inbox → save serverStartedAt to localStorage"]
-    Open([Open a chat]) --> Each["For each undelivered message with retryCount == 0"]
+    Inbox --> Each["For each undelivered message with retryCount == 0"]
     Each --> Cmp{"message.serverStartedAt<br/>≠ localStorage.serverStartedAt?"}
     Cmp -- No --> Keep["Leave as-is"]
-    Cmp -- Yes --> Resend["Resend once: POST /messages (same messageId), set retryCount = 1"]
+    Cmp -- Yes --> Resend["Resend once: POST /messages/batch, set retryCount = 1"]
 ```
 
 

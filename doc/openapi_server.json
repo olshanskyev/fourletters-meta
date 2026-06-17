@@ -240,6 +240,35 @@
         }
       }
     },
+    "/messages/batch": {
+      "post": {
+        "tags": ["Messages"],
+        "summary": "Submit a batch of messages (resync)",
+        "description": "Re-submits multiple unconfirmed outbox messages in a single call — e.g. after the client detects a Server restart (changed 'serverStartedAt'). Returns a per-message result and the current 'serverStartedAt'.",
+        "operationId": "sendMessages",
+        "security": [{ "BearerAuth": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "./models.json#/components/schemas/MessageBatchRequest" }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Accepted: the Server has durably taken ownership of each message",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "./models.json#/components/schemas/MessageBatchResponse" }
+              }
+            }
+          },
+          "400": { "description": "Empty or oversized batch, or a malformed message" },
+          "401": { "description": "Unauthorized - Missing or invalid access token" }
+        }
+      }
+    },
     "/inbox": {
       "get": {
         "tags": ["Messages"],

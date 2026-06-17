@@ -116,10 +116,73 @@
             },
             "description": "The recipient's undelivered messages, in arrival order."
           },
+          "receipts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MessageReceipt"
+            },
+            "description": "Pending delivery/read acknowledgements for messages this user sent, accumulated while the user was offline. Returned once and then cleared."
+          },
           "serverStartedAt": {
             "type": "integer",
             "format": "int64",
             "description": "Epoch milliseconds at which this Server process started. A changed value across responses signals a restart, after which the client re-submits its unconfirmed outbox messages."
+          }
+        }
+      },
+      "MessageReceipt": {
+        "type": "object",
+        "required": ["messageId", "recipientId", "type"],
+        "description": "A delivery/read acknowledgement for a message the calling user sent, delivered to the sender via the inbox pull.",
+        "properties": {
+          "messageId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "ID of the original message being acknowledged."
+          },
+          "recipientId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "ID of the user who delivered/read the message."
+          },
+          "type": {
+            "type": "string",
+            "enum": ["delivered", "read"],
+            "description": "'delivered' = received and decrypted; 'read' = opened by the user."
+          }
+        }
+      },
+      "MessageBatchRequest": {
+        "type": "object",
+        "required": ["messages"],
+        "description": "Submits several messages in one call — used by the client to re-submit unconfirmed outbox messages after a detected Server restart. Idempotent per messageId.",
+        "properties": {
+          "messages": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 100,
+            "items": {
+              "$ref": "#/components/schemas/EncryptedMessage"
+            },
+            "description": "The messages to (re)submit, capped per request; the client chunks larger resyncs."
+          }
+        }
+      },
+      "MessageBatchResponse": {
+        "type": "object",
+        "required": ["results", "serverStartedAt"],
+        "properties": {
+          "results": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AcceptedResponse"
+            },
+            "description": "Per-message acceptance result, in request order."
+          },
+          "serverStartedAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Epoch milliseconds at which this Server process started (carried once for the whole batch)."
           }
         }
       },
@@ -132,6 +195,11 @@
             "format": "uuid",
             "description": "ID of the message being acknowledged."
           },
+          "originalSenderId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "ID of the original message's sender — the party to notify. Echoed by the recipient from the received message so the Server can relay this receipt "
+          },
           "type": {
             "type": "string",
             "enum": ["delivered", "read"],
@@ -139,7 +207,7 @@
           },
           "signature": {
             "type": "string",
-            "description": "Signature over (messageId, type) by the recipient's identity key (Base64). Lets the Server and the original sender trust the receipt without trusting any Hub."
+            "description": "Signature over (messageId, type, originalSenderId) by the recipient's identity key (Base64). Lets the Server and the original sender trust the receipt without trusting any Hub."
           }
         }
       },
