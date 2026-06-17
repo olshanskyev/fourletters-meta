@@ -74,11 +74,6 @@
             "format": "uuid",
             "description": "ID of the sender user. Set by the Server from the authenticated session at send time; any client-provided value is ignored. Omitted in the send request."
           },
-          "seq": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Per-recipient monotonic sequence number assigned by the Server on accept. Present on delivered/inbox messages; omitted in the send request."
-          },
           "payload": {
             "type": "string",
             "description": "E2E encrypted message payload (Base64)"
@@ -91,40 +86,40 @@
       },
       "AcceptedResponse": {
         "type": "object",
-        "required": ["messageId", "seq", "status"],
+        "required": ["messageId", "status"],
         "properties": {
           "messageId": {
             "type": "string",
             "format": "uuid",
             "description": "ID of the accepted message (echoed from the request)."
           },
-          "seq": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Per-recipient sequence number assigned by the Server."
-          },
           "status": {
             "type": "string",
             "enum": ["accepted"],
             "description": "The Server has durably taken ownership of the message."
+          },
+          "serverStartedAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Epoch milliseconds at which this Server process started. A changed value across responses signals a restart, after which the client re-submits its unconfirmed outbox messages."
           }
         }
       },
       "InboxResponse": {
         "type": "object",
-        "required": ["messages", "lastSeq"],
+        "required": ["messages"],
         "properties": {
           "messages": {
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/EncryptedMessage"
             },
-            "description": "Undelivered messages with seq greater than the requested 'since', ordered by seq ascending."
+            "description": "The recipient's undelivered messages, in arrival order."
           },
-          "lastSeq": {
+          "serverStartedAt": {
             "type": "integer",
             "format": "int64",
-            "description": "Highest sequence number the Server has accepted for this recipient. Lets the client detect gaps versus what it received live."
+            "description": "Epoch milliseconds at which this Server process started. A changed value across responses signals a restart, after which the client re-submits its unconfirmed outbox messages."
           }
         }
       },
@@ -163,7 +158,7 @@
             "description": "ID of the user who delivered/read the message (the original recipient)."
           }
         }
-      },      
+      },
       "MessageEvent": {
         "type": "object",
         "required": ["event", "data"],
@@ -189,6 +184,34 @@
           },
           "data": {
             "$ref": "#/components/schemas/ReceiptData"
+          }
+        }
+      },
+      "HubRegistrationRequest": {
+        "type": "object",
+        "description": "Sent by a Hub to the Server on boot to obtain its relay queue. Authentication is via the registration bearer token (a shared secret in Phase 1; a dashboard-issued per-Hub token later). The body itself carries no trust.",
+        "properties": {
+          "instanceId": {
+            "type": "string",
+            "description": "Optional Hub-chosen instance label reported for diagnostics/dashboard display only. The Server does not derive identity or trust from it; the authoritative hubId is assigned by the Server."
+          }
+        }
+      },
+      "HubRegistrationResponse": {
+        "type": "object",
+        "required": ["hubId", "queueName", "exchange"],
+        "properties": {
+          "hubId": {
+            "type": "string",
+            "description": "Server-assigned identifier for this Hub registration. Names the Hub's queue and (in the volunteer phase) ties it to an owner for accountability and revocation."
+          },
+          "queueName": {
+            "type": "string",
+            "description": "Name of the auto-delete queue the Server provisioned for this Hub. The Hub binds user routing keys to it and consumes it; the Hub never declares queues itself."
+          },
+          "exchange": {
+            "type": "string",
+            "description": "Name of the topic exchange the Hub binds user routing keys against (messages.exchange)."
           }
         }
       }

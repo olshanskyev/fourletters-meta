@@ -17,7 +17,7 @@ The Hub is intentionally a dumb pipe. The following responsibilities live elsewh
 - **It does not handle delivery/read receipts.** The recipient sends **signed** receipts **directly to the Server** over HTTPS, out of band from the Hub.
 - **It does not inject `senderId` or guard against spoofing.** Sender identity is bound by the **Server** at send time, and payloads are **signed end-to-end** by the sender's identity key (verified by the recipient against the key directory).
 - **It does not transform actions into events.** Payloads are opaque; any event semantics (e.g. a "read" notification) are produced by the **Server** before it publishes.
-- **It does not provide durability.** RabbitMQ is non-durable live fan-out. A missed live delivery is recovered by the Server's `GET /api/inbox?since=<seq>` sync — there is **no 10s ACK timer and no store-and-forward**.
+- **It does not provide durability.** RabbitMQ is non-durable live fan-out. A missed live delivery is recovered by the Server's `GET /api/inbox` sync — there is **no 10s ACK timer and no store-and-forward**.
 
 ## Identity & Forwarding
 
@@ -25,7 +25,7 @@ The Hub treats every consumed payload as an **opaque envelope** addressed by rou
 
 ## Acknowledgement Model
 
-The Hub consumes with **manual ack** and acks RabbitMQ once the payload has been written to the client's WebSocket. If the target user has **no live session** (e.g. it just disconnected) or the write fails, the Hub simply **discards the delivery (ack-and-drop)**. Nothing is lost: the Server retains the copy until it receives a signed receipt, otherwise flushes it to the durable inbox, and the client pulls it on reconnect via `GET /api/inbox?since=<seq>`. There are no timers and no nack-to-store-and-forward, because the delivery guarantee lives entirely in the Server, not in the Hub or the broker.
+The Hub consumes with **manual ack** and acks RabbitMQ once the payload has been written to the client's WebSocket. If the target user has **no live session** (e.g. it just disconnected) or the write fails, the Hub simply **discards the delivery (ack-and-drop)**. Nothing is lost: the Server retains the copy until it receives a signed receipt, otherwise flushes it to the durable inbox, and the client pulls it on reconnect via `GET /api/inbox`. There are no timers and no nack-to-store-and-forward, because the delivery guarantee lives entirely in the Server, not in the Hub or the broker.
 
 ## Example: Read Receipts Are Server-Driven
 

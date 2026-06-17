@@ -19,6 +19,10 @@
     {
       "name": "Messages",
       "description": "Sending messages, inbox sync, and signed delivery receipts"
+    },
+    {
+      "name": "Hubs",
+      "description": "Hub registration and relay-queue provisioning"
     }
   ],
   "paths": {
@@ -211,7 +215,7 @@
       "post": {
         "tags": ["Messages"],
         "summary": "Send an encrypted message",
-        "description": "Submits an E2E-encrypted, sender-signed message. The Server is the sole entry point for sending (clients never send through a Hub). It assigns a per-recipient sequence number, takes durable ownership, and publishes the payload to RabbitMQ for live delivery. 'senderId' is set from the authenticated session; any client-provided value is ignored.",
+        "description": "Submits an E2E-encrypted, sender-signed message. The Server is the sole entry point for sending (clients never send through a Hub). It takes durable ownership and publishes the payload to RabbitMQ for live delivery. 'senderId' is set from the authenticated session; any client-provided value is ignored.",
         "operationId": "sendMessage",
         "security": [{ "BearerAuth": [] }],
         "requestBody": {
@@ -240,21 +244,12 @@
       "get": {
         "tags": ["Messages"],
         "summary": "Sync undelivered messages",
-        "description": "Returns the recipient's undelivered messages with seq greater than 'since', from the Server-owned inbox (hot tier + durable store)",
+        "description": "Returns the recipient's undelivered messages from the Server-owned inbox (hot tier + durable store), in arrival order.",
         "operationId": "getInbox",
         "security": [{ "BearerAuth": [] }],
-        "parameters": [
-          {
-            "name": "since",
-            "in": "query",
-            "required": false,
-            "description": "Return messages with seq strictly greater than this value. Omit or 0 to fetch everything pending.",
-            "schema": { "type": "integer", "format": "int64", "default": 0 }
-          }
-        ],
         "responses": {
           "200": {
-            "description": "Pending messages and the current inbox high-water mark",
+            "description": "The recipient's pending messages",
             "content": {
               "application/json": {
                 "schema": { "$ref": "./models.json#/components/schemas/InboxResponse" }
@@ -286,6 +281,34 @@
           "401": { "description": "Unauthorized - Missing or invalid access token" }
         }
       }
+    },
+    "/hubs/register": {
+      "post": {
+        "tags": ["Hubs"],
+        "summary": "Register a Hub and provision its relay queue",
+        "description": "Called by a Hub on boot. The Hub authenticates with a registration bearer token",
+        "operationId": "registerHub",
+        "security": [{ "HubRegistrationAuth": [] }],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "./models.json#/components/schemas/HubRegistrationRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Hub registered; relay queue provisioned",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "./models.json#/components/schemas/HubRegistrationResponse" }
+              }
+            }
+          },
+          "401": { "description": "Unauthorized - Missing or invalid registration token" }
+        }
+      }
     }
   },
   "components": {
@@ -299,6 +322,11 @@
         "type": "apiKey",
         "in": "cookie",
         "name": "refresh_token"
+      },
+      "HubRegistrationAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "Hub registration token."
       }
     }
   }

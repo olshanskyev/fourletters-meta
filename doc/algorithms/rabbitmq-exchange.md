@@ -11,7 +11,7 @@ For the high-level send/receive flow, see [2.4 Message Sending & Receiving (Serv
 | Object | Type | Declared by | Created when | Removed when | Durability |
 | --- | --- | --- | --- | --- | --- |
 | `messages.exchange` | Topic exchange | **Server** | Server boot | Never (long-lived definition) | Durable *definition*; carries **transient** (non-persistent) messages |
-| `hub.queue.{hubId}` | Queue (`auto-delete`) | **Server** | When a Hub authenticates/registers with the Server | Auto-deletes when the Hub's consumer disconnects | Non-durable |
+| `hub.queue.{hubId}` | Queue (`auto-delete`) | **Server** | When a Hub authenticates/registers with the Server | Auto-deletes when the Hub's consumer disconnects | Durable *definition*, `auto-delete` (carries transient messages) |
 | Binding `user.{id}` → `hub.queue.{hubId}` | Binding | **Hub** | A user's WebSocket **connects** to that Hub | That user **disconnects** (binding removed immediately) | n/a |
 
 That is the **entire** Phase 1 topology: one exchange, one ephemeral queue per Hub, and one binding per online user.
@@ -19,7 +19,7 @@ That is the **entire** Phase 1 topology: one exchange, one ephemeral queue per H
 ### Who declares what, and why
 
 - **The Server declares all durable structure: the exchange and every Hub queue.** The Hub itself has **no permission to create or delete queues or exchanges** — it can only *bind* and *consume*. This is deliberate: a Hub that could declare queues could flood the broker with thousands of them (a resource-exhaustion DoS), which matters once Hubs are untrusted. By keeping queue creation on the Server, the number of queues is capped at exactly **one per authenticated Hub**.
-- **One queue per Hub, provisioned on registration.** When a Hub starts it authenticates to the Server; the Server (idempotently) declares that Hub's `hub.queue.{hubId}` as `auto-delete` and returns the queue name to the Hub. Because the queue is `auto-delete`, it disappears automatically once the Hub's consumer disconnects, so a crashed or restarted Hub still cleans up with no central bookkeeping.
+- **One queue per Hub, provisioned on registration.** When a Hub starts it authenticates to the Server; the Server (idempotently) declares that Hub's `hub.queue.{hubId}` as `auto-delete` and returns the queue name to the Hub. Because the queue is `auto-delete`, it disappears automatically once the Hub's consumer disconnects, so a crashed or restarted Hub still cleans up with no central bookkeeping. The queue is declared **durable** (definition only) rather than transient: RabbitMQ deprecated transient non-exclusive queues, and the queue cannot be exclusive because an exclusive queue is bound to the declaring (Server) connection while the Hub is the consumer. Durability of the *definition* does not make messages persistent — the bus stays transient.
 - **The Hub manages only bindings, per connection.** When Bob's WebSocket connects to Hub A, Hub A binds `user.bob` to its own queue; when Bob disconnects, Hub A unbinds it. Binding is the **only** topology operation a Hub performs. Bindings are therefore **live presence**: a routing key is bound **if** that user currently has an open WebSocket somewhere. (Restricting *which* `user.{id}` a Hub may bind is the separate per-identity enforcement deferred to [FUTURE_EXTENSIONS.md](../FUTURE_EXTENSIONS.md#4-route-scoping--scoped-transport-tokens).)
 
 ### Direction of traffic (Phase 1)
@@ -31,8 +31,8 @@ That is the **entire** Phase 1 topology: one exchange, one ephemeral queue per H
 ## Routing Behaviour
 
 - **Recipient online (binding exists):** `messages.exchange` routes `user.bob` to the bound `hub.queue.{hubId}`; the Hub consumes it and pushes it over Bob's WebSocket.
-- **Recipient offline (no binding):** the message is **unroutable** and is simply **discarded by the broker**. This is safe and intentional — the Server still holds the copy (hot tier), and after the hold window it performs a single write to the PostgreSQL inbox. Bob receives it later via the Server's `GET /api/inbox?since=<seq>` sync. The Server does **not** rely on broker routability feedback (no `mandatory`/return handling is required for correctness).
-- **No live ack — no re-publish.** A published message is a *best-effort live* attempt only. If no signed `delivered` receipt arrives within the hold window, the Server does **not** re-publish; it simply lets the copy flush from the hot tier to the DB. The message is then delivered when Bob's client next **pulls** via `GET /api/inbox?since=<seq>` (the `/inbox` read returns the union of the hot and cold tiers, so it covers messages still in memory as well as those already written to the DB).
+- **Recipient offline (no binding):** the message is **unroutable** and is simply **discarded by the broker**. This is safe and intentional — the Server still holds the copy (hot tier), and after the hold window it performs a single write to the PostgreSQL inbox. Bob receives it later via the Server's `GET /api/inbox` sync. The Server does **not** rely on broker routability feedback (no `mandatory`/return handling is required for correctness).
+- **No live ack — no re-publish.** A published message is a *best-effort live* attempt only. If no signed `delivered` receipt arrives within the hold window, the Server does **not** re-publish; it simply lets the copy flush from the hot tier to the DB. The message is then delivered when Bob's client next **pulls** via `GET /api/inbox` (the `/inbox` read returns the union of the hot and cold tiers, so it covers messages still in memory as well as those already written to the DB).
 
 ## Permissions (Phase 1 baseline)
 
@@ -54,7 +54,7 @@ Below is the flowchart illustrating the step-by-step logic executed by the Serve
 flowchart TD
     Start([Alice PWA])
     Send[POST /api/messages to Server]
-    ServerAccept[Server: assign seq<br/>hold copy in hot tier]
+    ServerAccept[Server: hold copy in hot tier]
     Publish[Server publishes to<br/>messages.exchange<br/>Routing Key: user.bob]
 
     subgraph RabbitMQ [RabbitMQ - live fan-out only]
@@ -76,7 +76,7 @@ flowchart TD
     ServerDrop[Server drops retained copy]
     HoldExpire[Hold window elapses<br/>no signed receipt]
     DB[(PostgreSQL inbox<br/>single write)]
-    Sync[Later: Bob GET /api/inbox?since=seq]
+    Sync[Later: Bob GET /api/inbox]
 
     Start --> Send --> ServerAccept --> Publish --> MainExchange
 
