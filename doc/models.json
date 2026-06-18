@@ -8,6 +8,23 @@
   "paths": {},
   "components": {
     "schemas": {
+      "ReceiptType": {
+        "type": "string",
+        "enum": ["delivered", "read"],
+        "description": "'delivered' = the recipient device received and decrypted the message; 'read' = the user opened it."
+      },
+      "RefreshError": {
+        "type": "object",
+        "required": ["reason"],
+        "description": "Body of a 401 from /auth/refresh. 'revoked' means a newer login took over the single active device, on which the client wipes its local E2E identity keys; the other reasons just require re-authentication.",
+        "properties": {
+          "reason": {
+            "type": "string",
+            "enum": ["revoked", "expired", "invalid"],
+            "description": "'revoked' = invalidated by a newer login (single-active-device takeover); 'expired' = refresh token past expiry; 'invalid' = malformed/missing or session mismatch."
+          }
+        }
+      },
       "AuthRequest": {
         "type": "object",
         "required": ["token"],
@@ -132,7 +149,7 @@
       },
       "MessageReceipt": {
         "type": "object",
-        "required": ["messageId", "recipientId", "type"],
+        "required": ["messageId", "recipientId", "type", "signature"],
         "description": "A delivery/read acknowledgement for a message the calling user sent, delivered to the sender via the inbox pull.",
         "properties": {
           "messageId": {
@@ -146,9 +163,11 @@
             "description": "ID of the user who delivered/read the message."
           },
           "type": {
+            "$ref": "#/components/schemas/ReceiptType"
+          },
+          "signature": {
             "type": "string",
-            "enum": ["delivered", "read"],
-            "description": "'delivered' = received and decrypted; 'read' = opened by the user."
+            "description": "Signature over (messageId, type, originalSenderId) by the recipient's identity key (Base64), echoed unaltered from the submitted DeliveryReceipt."
           }
         }
       },
@@ -201,19 +220,17 @@
             "description": "ID of the original message's sender — the party to notify. Echoed by the recipient from the received message so the Server can relay this receipt "
           },
           "type": {
-            "type": "string",
-            "enum": ["delivered", "read"],
-            "description": "'delivered' = the recipient device received and decrypted it; 'read' = the user opened it."
+            "$ref": "#/components/schemas/ReceiptType"
           },
           "signature": {
             "type": "string",
-            "description": "Signature over (messageId, type, originalSenderId) by the recipient's identity key (Base64). Lets the Server and the original sender trust the receipt without trusting any Hub."
+            "description": "Signature over (messageId, type, originalSenderId) by the recipient's identity key (Base64). Lets the original sender trust the receipt without trusting any Hub."
           }
         }
       },
       "ReceiptData": {
         "type": "object",
-        "required": ["messageId", "recipientId"],
+        "required": ["messageId", "recipientId", "type", "signature"],
         "properties": {
           "messageId": {
             "type": "string",
@@ -224,6 +241,13 @@
             "type": "string",
             "format": "uuid",
             "description": "ID of the user who delivered/read the message (the original recipient)."
+          },
+          "type": {
+            "$ref": "#/components/schemas/ReceiptType"
+          },
+          "signature": {
+            "type": "string",
+            "description": "Signature over (messageId, type, originalSenderId) by the recipient's identity key (Base64), relayed unaltered from the submitted DeliveryReceipt."
           }
         }
       },

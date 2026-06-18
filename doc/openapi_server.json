@@ -30,6 +30,7 @@
       "post": {
         "tags": ["Auth"],
         "summary": "Login using VK OAuth token",
+        "description": "Validates the VK OAuth token and issues a new session. Single-active-device policy: a successful login revokes the user's other refresh tokens, so any previously signed-in device becomes revoked on its next refresh.",
         "operationId": "loginVk",
         "security": [],
         "requestBody": {
@@ -71,6 +72,7 @@
       "post": {
         "tags": ["Auth"],
         "summary": "Login using Google OAuth token",
+        "description": "Validates the Google OAuth token and issues a new session. Single-active-device policy: a successful login revokes the user's other refresh tokens, so any previously signed-in device becomes revoked on its next refresh.",
         "operationId": "loginGoogle",
         "security": [],
         "requestBody": {
@@ -150,7 +152,22 @@
             }
           },
           "401": {
-            "description": "Refresh token is invalid, expired, or missing"
+            "description": "Refresh token is invalid, expired, missing, or was revoked by a newer login. A 'revoked' reason signals the single-active-device takeover, on which the client wipes its local E2E identity keys (see auth.md).",
+            "headers": {
+              "Set-Cookie": {
+                "description": "Clears the HttpOnly refresh token cookie",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./models.json#/components/schemas/RefreshError"
+                }
+              }
+            }
           }
         }
       }

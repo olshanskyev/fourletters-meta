@@ -173,7 +173,7 @@ The delivery guarantee does **not** rest on RabbitMQ (a relay may consume a mess
 
 > Beyond Phase 1: this signal is retired once the hot tier moves to a persistent Redis store, which survives restarts (see [FUTURE_EXTENSIONS.md](FUTURE_EXTENSIONS.md)).
 
-A freshly `accepted` message lives only in the hot tier until the hold-window flush, so a Server **restart** within that window loses any copy not yet delivered. Recovery is a single idempotent resend, keyed by `messageId` (the Server upserts — never a duplicate). The trigger is the Server's `serverStartedAt`, returned on every `accepted` and `/inbox` response: if it changed since a message was sent, that message's instance is gone and the message is resent **once**.
+A freshly `accepted` message lives only in the hot tier until the hold-window flush, so a Server **restart** within that window loses any copy not yet delivered. Recovery is a single idempotent resend, keyed by `messageId` (the Server upserts — never a duplicate). The trigger is the Server's `serverStartedAt`, returned on every `accepted` and `/inbox` response: if it changed since a message was sent, that message's instance can be gone and the message is resent **once**.
 
 **Algorithm:**
 1. **On app start** — call `GET /inbox` and save `serverStartedAt` to `localStorage`.

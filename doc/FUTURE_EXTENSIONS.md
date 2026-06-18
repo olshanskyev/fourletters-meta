@@ -210,3 +210,67 @@ The volunteer onboarding model replaces the single shared secret with **per-Hub,
 **Why this likely removes the need for mTLS / a private CA.** mTLS was the other candidate for giving volunteer Hubs an identity and a revocation path, but it requires issuing client certificates, running a CA (the truststore-per-leaf approach does not scale), and operating revocation (CRL/OCSP or short-lived certs). A dashboard token registry delivers the same two properties — **per-Hub identity** and **independent revocation** — as ordinary application state, with no PKI to operate. mTLS can still be added later as a transport-layer second factor, but it is not required for volunteer onboarding.
 
 **Forward-compatibility.** Because Phase 1 already ships the registration call in **bearer-token shape**, enabling volunteers later adds only token *issuance* (the dashboard) and *validation* (lookup by hash + status) plus the `Hub` table — the Hub-side registration client and the `POST /hubs/register` contract are unchanged.
+
+---
+
+## 8. Per-User At-Rest Key Binding
+
+In Phase 1 the client's at-rest master key is a non-extractable AES-GCM `CryptoKey` in IndexedDB (see [MESSAGE_SECURITY.md §1.2](MESSAGE_SECURITY.md#12-at-rest-encryption-of-the-per-user-db)). Storage is partitioned per **origin**, so the key is safe from other websites and its raw bytes are non-exfiltratable — but it is **not bound to a single account-picker user**: any script on the origin can open another local user's database and *use* its key. This extension binds the master key to a per-user secret so it is usable by **only that user**.
+
+Two variants, differing in where the unlocking secret comes from:
+
+- **PIN / passphrase (offline).** The master key is generated `extractable: true`, **wrapped** with a key derived from a user-entered PIN via PBKDF2/Argon2, and only the wrapped blob is stored. Unlock re-derives the wrapping key from the PIN. Fully **offline** (derivation is local); cost is a PIN prompt on unlock.
+- **Server-issued secret (online).** On login the Server returns a per-user unlock secret that wraps the master key; the unwrapped key is held only in `sessionStorage`/memory for the session. Stronger separation (the wrap secret never rests on the device) but **requires connectivity to unlock**, so it trades away offline history access — acceptable only where an online-unlock requirement is tolerable.
+
+Both keep the rest of the model unchanged: messages stay AES-GCM at rest, decrypted plaintext stays in the volatile in-memory cache, and the wrapped/derived key replaces only *how the master key is obtained at unlock time*.
+
+---
+
+## 9. Multi-Device Key Handling
+
+In Phase 1 a user's E2E key pairs are generated and held on a **single primary device** (see [MESSAGE_SECURITY.md §2](MESSAGE_SECURITY.md#2-keys-created-at-first-authentication)); a second device generating its own keys would publish a competing public key and break verification for in-flight messages. This extension lets one identity span several devices. Two approaches:
+
+- **Per-device keys (no transfer).** Each device generates and publishes its **own** key pair. The directory holds a **set** of keys per user, and a sender encrypts the payload **once per recipient device** (fan-out to all of the recipient's current device keys). No private key ever leaves a device; revoking a lost device is just removing its key from the directory. This is the Signal/Telegram-style model.
+- **Key transfer.** The single identity/encryption **private key** is exported to a new device over a secure channel (e.g. a QR code scanned device-to-device, or an end-to-end-encrypted transfer). Keeps exactly one identity and one directory key, at the cost of safely transporting a private key off its origin device.
+
+**Directory implication.** Either way `GET /keys/{userId}` returns a **set** of device public keys rather than one, and the client picks/encrypts accordingly. The per-device model also needs a per-device identifier and a removal (revocation) path in the directory; key transfer leaves the existing single-key directory shape unchanged.
+
+---
+
+## 10. Group Messaging (Sender-Key + Rotation on Membership Change)
+
+Phase 1 encrypts each message to **one** recipient (per-message ephemeral ECDH, [MESSAGE_SECURITY.md §4](MESSAGE_SECURITY.md#4-signing-verifying--decrypting)). Groups need a different shape: encrypting N times per message (once per member) does not scale and, more importantly, cannot give the **"a member who leaves can no longer read group messages"** guarantee on its own. The standard answer is a **sender-key** model with a rotating symmetric group key.
+
+**Model.**
+- The group shares a **symmetric group key** (the "sender key"), tagged with an **epoch** (version) number. A message is encrypted **once** under the current epoch's key, then signed by the sender's identity key as usual.
+- The group key is **distributed to each member encrypted to their personal encryption key** (the existing directory key). The Server relays these wrapped copies but **never sees the group key itself** — E2E is preserved.
+
+**Rotation is the core mechanism.**
+- **On member removal / leave → rotate (mandatory).** Generate a new group key at a new epoch and distribute it **only to the remaining members**. The departed member never receives it, so they **cannot decrypt any message sent after they left**. Messages from *before* they left are not retroactively protected — they already held that plaintext (inherent, unavoidable).
+- **On member join → rotate (optional, policy).** Whether a **new** member must rotate depends on the backward-secrecy policy:
+  - **Rotate on join** if new members must **not** be able to read history sent before they joined (prevents decrypting any earlier ciphertext they may have captured).
+  - **Skip rotation on join** if new members are allowed to see recent history; the existing epoch key is simply wrapped to the new member.
+
+  Removal always rotates; join rotation is the configurable choice.
+
+**Server owns the roster, clients own the key.** The Server tracks **membership** (to fan out to each member's `user.<id>`) and the current **epoch** number, but never holds the group key — it references the key only by opaque epoch.
+
+**A member client generates the key — never the Server** (the key must never exist in Server memory). The group creator (or, on rotation, a remaining member) generates the random 256-bit key locally, wraps it to each member's directory public key, and posts the opaque wrapped blobs. The Server relays them and updates the roster/epoch.
+
+**Concurrent rotation is serialized by the epoch (compare-and-swap).** A rotation publishing epoch `N+1` is accepted only if the current epoch is exactly `N`. The first writer wins; a second client publishing `N+1` gets **409 Conflict**, discards its key, refetches state, and retries as `N+2` only if still needed. Each message carries its **epoch tag** so recipients decrypt with the matching key.
+
+**What changes vs. the 1:1 implementation.**
+
+| Area | 1:1 (Phase 1) | Group |
+| --- | --- | --- |
+| Encryption | per-message ephemeral ECDH to one peer | symmetric **group key**, one encryption per message; rotated on membership change |
+| Key distribution | none (directory lookup) | group key **wrapped per member**; re-wrapped on each rotation |
+| Membership | implicit (2 parties) | explicit **roster + epoch**, owned by the Server (key value stays client-side) |
+| Routing | publish `user.<recipient>` | **fan-out**: publish to each member's `user.<id>` |
+| Signature | sign with identity key | **unchanged** — still per-sender signed |
+| Local store | per conversation | conversation = group; persist **current epoch key** + epoch number |
+
+**Forward-secrecy granularity.** Simple sender-key (rotate only on membership change) is the practical first step. Full per-message group ratcheting (MLS / TreeKEM) is substantially heavier and is deferred unless required.
+
+
+

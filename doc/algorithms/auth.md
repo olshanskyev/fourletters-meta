@@ -91,3 +91,17 @@ flowchart TD
     BE_ReturnLogout --> Gui_ClearAll
     Gui_ClearAll --> GoToLogin3
 ```
+
+## Single-Active-Device Policy
+
+Phase 1 enforces **one active device (session) per user**. A device is "active" exactly while its refresh token is valid.
+
+- **Fresh login revokes the other sessions.** On a non-refresh login (`POST /auth/{provider}`), after validating the OAuth token the Server **revokes all of the user's existing refresh tokens** and then issues the new session. So signing in on a new device silently invalidates the previous one.
+
+  > **ToDo:** the `refresh_tokens` table can hold **multiple rows per `user_id`** (one per session), so it is structurally multi-session capable; single-active-device is enforced here as a **policy** by revoking the user's other rows on fresh login. (`session_id` is just a client-side correlation handle — the GUI drops it to neutralize the cookie when a logout gets no response — not the multi-session mechanism.) Revisit if a multi-session policy (keep N devices) is ever wanted.
+
+- **Revoked is a distinct signal from expired.** A refresh request whose token was revoked by a newer login returns `401` with body `{ "reason": "revoked" }`, as opposed to a plain `401` for an expired/missing token. The client uses this to decide whether to **wipe E2E keys** (see below), not merely to re-authenticate.
+
+- **Client reaction to `revoked`.** On a `revoked` refresh response the client **deletes only the identity/encryption key pairs** (it keeps the messages, conversations, and the DB master key, so local history stays readable) and returns to login. On the subsequent login it finds no key pair, regenerates one, and re-uploads the public keys (`PUT /keys`). See [MESSAGE_SECURITY.md §2.1](../MESSAGE_SECURITY.md#21-key-lifecycle-logout--single-active-device-policy).
+
+- **Explicit logout keeps keys.** A user-initiated logout only deletes the server-side refresh token (by `sessionId`) and clears the client's access token + `sessionId`; the identity/encryption keys remain so re-login on the same device is seamless and does not rotate the directory.

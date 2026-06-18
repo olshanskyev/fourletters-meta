@@ -59,7 +59,7 @@ flowchart TD
     Rec -->|"drop copy (hot or cold)"| Hot
     Rec -->|"delete row if flushed"| Cold
     Rec -->|"relay live (mandatory)"| MQ
-    MQ -.->|"unroutable: sender offline → retain"| PR
+    MQ -.->|"only for receipts: unroutable: sender offline → retain"| PR
 
     Inb -->|"union read (as recipient)"| Hot
     Inb -->|"union read (as recipient)"| Cold
@@ -91,12 +91,14 @@ stateDiagram-v2
 
 A receipt carries `originalSenderId`, so relaying it does **not** depend on the retained copy still existing — this is what lets a second receipt (`read` after `delivered`, in any order) still reach the sender. The receipt is published **`mandatory`**: if the sender is **online** it is routed and delivered live (and *nothing* is stored); if the sender is **offline** the broker returns it as unroutable and the Server retains it in `PendingReceipts` for the sender's next `GET /inbox`. This way an online sender never piles up duplicate acks.
 
+The Server authenticates the **submitter** of `POST /receipts` via JWT (transport auth) and then relays the recipient's **`signature` unaltered** — live as `ReceiptData.signature` and in `GET /inbox` as `MessageReceipt.signature`. The signature is the end-to-end proof the **original sender** verifies against the public-key directory; server-side verification is optional (reject-early) and never the load-bearing check.
+
 ```mermaid
 flowchart TD
-    Start([Recipient sends receipt]) --> Drop["recordReceipt: drop retained copy (first receipt only)"]
-    Drop --> Live["relay live, mandatory → user.&lt;sender&gt;"]
-    Live --> Online{Sender online?<br/>(routable binding)}
-    Online -- "Yes (routed)" --> Got["Sender gets it instantly → ✓✓ / read<br/>(nothing stored)"]
+    Start([Recipient sends receipt]) --> Drop["recordReceipt: drop retained message copy (first receipt only)"]
+    Drop --> Live["relay receiopt live, mandatory"]
+    Live --> Online{Sender online?<br/> routable binding}
+    Online -- "Yes (routed)" --> Got["Sender gets it instantly → ✓✓ / read<br/> (nothing stored)"]
     Online -- "No (returned unroutable)" --> Store["Server retains it in PendingReceipts (heap)"]
     Store --> Pull["Sender reconnects → GET /inbox drains pending receipts"]
     Pull --> Got
