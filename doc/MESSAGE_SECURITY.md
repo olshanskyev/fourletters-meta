@@ -102,7 +102,7 @@ When the revoked Device A logs in again, it finds **no key pair**, regenerates o
 
 The Server stores and serves public keys only — it is a **directory**, not a key escrow. It never holds any private key. Public keys are not secret; their integrity is what matters (so peers encrypt/verify against the right key).
 
-**Storage (PostgreSQL).** A `public_keys` table keyed by `user_id` holds the signing and encryption public keys (JWK or Base64 SPKI) plus timestamps.
+**Storage (PostgreSQL).** A `public_keys` table keyed by `user_id` holds the signing and encryption public keys (Base64 SPKI) plus timestamps.
 
 **Endpoints** (tag `Keys`):
 

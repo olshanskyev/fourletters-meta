@@ -228,6 +228,65 @@
           }
         }
       },
+      "KeysUploadRequest": {
+        "type": "object",
+        "required": ["signingPublicKey", "encryptionPublicKey"],
+        "properties": {
+          "signingPublicKey": {
+            "type": "string",
+            "description": "The caller's ECDSA P-256 public signing key (Base64 SPKI)."
+          },
+          "encryptionPublicKey": {
+            "type": "string",
+            "description": "The caller's ECDH P-256 public encryption key (Base64 SPKI)."
+          }
+        }
+      },
+      "PublicKeySet": {
+        "type": "object",
+        "required": ["signingPublicKey", "encryptionPublicKey", "uploadedAt"],
+        "properties": {
+          "signingPublicKey": {
+            "type": "string",
+            "description": "ECDSA P-256 public signing key (Base64 SPKI)."
+          },
+          "encryptionPublicKey": {
+            "type": "string",
+            "description": "ECDH P-256 public encryption key (Base64 SPKI)."
+          },
+          "uploadedAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Epoch milliseconds when these public keys were uploaded to the directory."
+          }
+        }
+      },
+      "KeysResponse": {
+        "type": "object",
+        "required": ["userId", "keys"],
+        "properties": {
+          "userId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The user id these public keys belong to."
+          },
+          "keys": {
+            "$ref": "#/components/schemas/PublicKeySet"
+          }
+        }
+      },
+      "PublicKeysBatchResponse": {
+        "type": "object",
+        "required": ["results"],
+        "properties": {
+          "results": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/KeysResponse"
+            }
+          }
+        }
+      },
       "ReceiptData": {
         "type": "object",
         "required": ["messageId", "recipientId", "type", "signature"],

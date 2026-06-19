@@ -23,6 +23,10 @@
     {
       "name": "Hubs",
       "description": "Hub registration and relay-queue provisioning"
+    },
+    {
+      "name": "Keys",
+      "description": "User public-key directory: upload and fetch E2E keys"
     }
   ],
   "paths": {
@@ -353,6 +357,93 @@
             }
           },
           "401": { "description": "Unauthorized - Missing or invalid registration token" }
+        }
+      }
+    }
+    ,
+    "/keys": {
+      "put": {
+        "tags": ["Keys"],
+        "summary": "Upload or replace caller's public keys",
+        "description": "Authenticated user uploads their current public signing and encryption keys. The server records them in the public key directory. The userId is taken from the authenticated session and any client-provided userId is ignored.",
+        "operationId": "uploadKeys",
+        "security": [{ "BearerAuth": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "./models.json#/components/schemas/KeysUploadRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Public keys stored or replaced",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "./models.json#/components/schemas/KeysResponse" }
+              }
+            }
+          },
+          "400": { "description": "Malformed request" },
+          "401": { "description": "Unauthorized - Missing or invalid access token" }
+        }
+      },
+      "get": {
+        "tags": ["Keys"],
+        "summary": "Batch fetch public keys",
+        "description": "Fetch public keys for multiple users via a comma-separated `ids` query parameter.",
+        "operationId": "getKeysBatch",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [
+          {
+            "name": "ids",
+            "in": "query",
+            "required": true,
+            "description": "Comma-separated list of user ids to fetch public keys for",
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Public keys for requested users",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "./models.json#/components/schemas/PublicKeysBatchResponse" }
+              }
+            }
+          },
+          "401": { "description": "Unauthorized - Missing or invalid access token" }
+        }
+      }
+    },
+    "/keys/{userId}": {
+      "get": {
+        "tags": ["Keys"],
+        "summary": "Fetch a user's public keys",
+        "description": "Retrieve the current public signing and encryption keys for a single user.",
+        "operationId": "getKeysByUserId",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [
+          {
+            "name": "userId",
+            "in": "path",
+            "required": true,
+            "description": "ID of the user whose public keys are requested",
+            "schema": { "type": "string", "format": "uuid" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The user's public keys",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "./models.json#/components/schemas/KeysResponse" }
+              }
+            }
+          },
+          "401": { "description": "Unauthorized - Missing or invalid access token" },
+          "404": { "description": "User not found or no keys published" }
         }
       }
     }

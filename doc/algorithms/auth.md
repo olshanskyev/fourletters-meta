@@ -23,25 +23,25 @@ flowchart TD
     %% GUI Container Nodes
     subgraph GUI [GUI Container]
         Start([GUI is loaded or timer event for refreshing])
-        CheckSession{Is sessionId in<br/>local storage?}
+        CheckSession{Is sessionCorrelationId in<br/>local storage?}
         GoToLogin([Redirect to login page])
-        SendRefresh[Send refresh token request<br/>Cookie: refresh_token<br/>Header: X-Session-ID = sessionId]
+        SendRefresh[Send refresh token request<br/>Cookie: refresh_token<br/>Header: X-Session-ID = sessionCorrelationId]
 
         Gui_CheckSuccess[Check response: Success]
-        Gui_SaveToken[Read sessionId from AuthResponse.accessToken<br/>Save to local storage]
+        Gui_SaveToken[Read sessionId from AuthResponse.accessToken<br/>Save to local storage as sessionCorrelationId]
         Gui_NormalCall([User uses accessToken for<br/>regular calls as Bearer token])
 
         Gui_CheckFail[Check response: Error/401]
         Gui_ClearToken[Clear accessToken]
         Gui_Is401{Is it 401 Error?}
-        Gui_ClearSession[Clear sessionId]
-        Gui_SkipClearSession[Keep sessionId]
+        Gui_ClearSession[Clear sessionCorrelationId]
+        Gui_SkipClearSession[Keep sesssessionCorrelationIdionId]
         GoToLogin2([Redirect to login page])
 
         Gui_Logout([User clicks logout])
         Gui_SendLogout[Send logout request<br/>Header: Authorization]
 
-        Gui_ClearAll[Clear access token and sessionId]
+        Gui_ClearAll[Clear access token and sessionCorrelationId]
         GoToLogin3([Redirect to login page])
     end
 
@@ -98,7 +98,7 @@ Phase 1 enforces **one active device (session) per user**. A device is "active" 
 
 - **Fresh login revokes the other sessions.** On a non-refresh login (`POST /auth/{provider}`), after validating the OAuth token the Server **revokes all of the user's existing refresh tokens** and then issues the new session. So signing in on a new device silently invalidates the previous one.
 
-  > **ToDo:** the `refresh_tokens` table can hold **multiple rows per `user_id`** (one per session), so it is structurally multi-session capable; single-active-device is enforced here as a **policy** by revoking the user's other rows on fresh login. (`session_id` is just a client-side correlation handle — the GUI drops it to neutralize the cookie when a logout gets no response — not the multi-session mechanism.) Revisit if a multi-session policy (keep N devices) is ever wanted.
+  > **Note:** the `refresh_tokens` table can hold **multiple rows per `user_id`** (one per session), so it is structurally multi-session capable; single-active-device is enforced here as a **policy** by revoking the user's other rows on fresh login. (`session_id` is just a client-side correlation handle — the GUI drops it to neutralize the cookie when a logout gets no response — not the multi-session mechanism.) Revisit if a multi-session policy (keep N devices) is ever wanted.
 
 - **Revoked is a distinct signal from expired.** A refresh request whose token was revoked by a newer login returns `401` with body `{ "reason": "revoked" }`, as opposed to a plain `401` for an expired/missing token. The client uses this to decide whether to **wipe E2E keys** (see below), not merely to re-authenticate.
 
