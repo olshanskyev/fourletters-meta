@@ -239,38 +239,12 @@ In Phase 1 a user's E2E key pairs are generated and held on a **single primary d
 
 ## 10. Group Messaging (Sender-Key + Rotation on Membership Change)
 
-Phase 1 encrypts each message to **one** recipient (per-message ephemeral ECDH, [MESSAGE_SECURITY.md §4](MESSAGE_SECURITY.md#4-signing-verifying--decrypting)). Groups need a different shape: encrypting N times per message (once per member) does not scale and, more importantly, cannot give the **"a member who leaves can no longer read group messages"** guarantee on its own. The standard answer is a **sender-key** model with a rotating symmetric group key.
+> **Promoted to Phase 1.** Group messaging with the sender-key model is now part of the shipped architecture — see [ARCHITECTURE.md §2.7](ARCHITECTURE.md#27-group-messaging-sender-key--rotation) for the server-side roster/epoch/fan-out flow and [MESSAGE_SECURITY.md §6](MESSAGE_SECURITY.md#6-group-encryption-sender-key--rotation) for the client crypto. Phase 1 policy: the group **owner** is the sole roster admin, and **both** join and removal rotate (new members get no prior history).
 
-**Model.**
-- The group shares a **symmetric group key** (the "sender key"), tagged with an **epoch** (version) number. A message is encrypted **once** under the current epoch's key, then signed by the sender's identity key as usual.
-- The group key is **distributed to each member encrypted to their personal encryption key** (the existing directory key). The Server relays these wrapped copies but **never sees the group key itself** — E2E is preserved.
+What remains **deferred** here is only the heavier forward-secrecy upgrade:
 
-**Rotation is the core mechanism.**
-- **On member removal / leave → rotate (mandatory).** Generate a new group key at a new epoch and distribute it **only to the remaining members**. The departed member never receives it, so they **cannot decrypt any message sent after they left**. Messages from *before* they left are not retroactively protected — they already held that plaintext (inherent, unavoidable).
-- **On member join → rotate (optional, policy).** Whether a **new** member must rotate depends on the backward-secrecy policy:
-  - **Rotate on join** if new members must **not** be able to read history sent before they joined (prevents decrypting any earlier ciphertext they may have captured).
-  - **Skip rotation on join** if new members are allowed to see recent history; the existing epoch key is simply wrapped to the new member.
+**Full per-message group ratcheting (MLS / TreeKEM).** Simple sender-key (rotate only on membership change) is the Phase 1 choice. Per-message ratcheting gives forward secrecy at message granularity rather than epoch granularity, but is substantially heavier (tree-based key agreement, per-member state) and is deferred unless required. It can replace the sender-key key-agreement layer without changing the roster ownership or the per-member fan-out already in place.
 
-  Removal always rotates; join rotation is the configurable choice.
-
-**Server owns the roster, clients own the key.** The Server tracks **membership** (to fan out to each member's `user.<id>`) and the current **epoch** number, but never holds the group key — it references the key only by opaque epoch.
-
-**A member client generates the key — never the Server** (the key must never exist in Server memory). The group creator (or, on rotation, a remaining member) generates the random 256-bit key locally, wraps it to each member's directory public key, and posts the opaque wrapped blobs. The Server relays them and updates the roster/epoch.
-
-**Concurrent rotation is serialized by the epoch (compare-and-swap).** A rotation publishing epoch `N+1` is accepted only if the current epoch is exactly `N`. The first writer wins; a second client publishing `N+1` gets **409 Conflict**, discards its key, refetches state, and retries as `N+2` only if still needed. Each message carries its **epoch tag** so recipients decrypt with the matching key.
-
-**What changes vs. the 1:1 implementation.**
-
-| Area | 1:1 (Phase 1) | Group |
-| --- | --- | --- |
-| Encryption | per-message ephemeral ECDH to one peer | symmetric **group key**, one encryption per message; rotated on membership change |
-| Key distribution | none (directory lookup) | group key **wrapped per member**; re-wrapped on each rotation |
-| Membership | implicit (2 parties) | explicit **roster + epoch**, owned by the Server (key value stays client-side) |
-| Routing | publish `user.<recipient>` | **fan-out**: publish to each member's `user.<id>` |
-| Signature | sign with identity key | **unchanged** — still per-sender signed |
-| Local store | per conversation | conversation = group; persist **current epoch key** + epoch number |
-
-**Forward-secrecy granularity.** Simple sender-key (rotate only on membership change) is the practical first step. Full per-message group ratcheting (MLS / TreeKEM) is substantially heavier and is deferred unless required.
-
+Other group-related extensions that compose with the deferred multi-device work ([§9](#9-multi-device-key-handling)): wrapping the group key to **each device** of each member, and richer roster roles (promotable admins) beyond the Phase 1 owner-only model.
 
 

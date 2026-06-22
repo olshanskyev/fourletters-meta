@@ -189,6 +189,48 @@ flowchart TD
     Cmp -- Yes --> Resend["Resend once: POST /messages/batch, set retryCount = 1"]
 ```
 
+### 2.7 Group Messaging (Sender-Key + Rotation)
+
+Phase 1 supports **group conversations** without changing the 1:1 wire format or send path. A 1:1 message encrypts a fresh payload per recipient (ephemeral ECDH, see [MESSAGE_SECURITY.md §4](MESSAGE_SECURITY.md#4-signing-verifying--decrypting)); a group instead shares a **symmetric "sender key"** so a message is encrypted **once** regardless of group size. The two paths coexist: `EncryptedMessage` simply carries an optional `groupId` + `epoch` ([models.json](models.json)), absent for 1:1.
+
+**Roster & epoch live on the Server; the key never does.** The Server owns the group **roster** (membership) and the current **epoch** number (the key version), but it never holds the group key — it only stores and relays opaque **wrapped key blobs** (the key encrypted to each member's directory encryption key). E2E is preserved: like message payloads, the Server sees only ciphertext.
+
+**Key generation is client-side.** The group owner (creator) generates a random 256-bit symmetric key locally, wraps it to every member's encryption public key, and posts the set via `POST /groups`. Every later epoch's key is generated the same way by whichever client rotates (the owner on a roster change, or **any member** on a plain rekey). The Server validates that a key set covers exactly the (post-change) roster and stores the blobs by `(groupId, epoch, recipientId)`.
+
+**Sending — Server fan-out per member (reuses the 1:1 path).** To send to a group, the client encrypts once under the current epoch key, signs with its identity key as usual, sets `groupId`+`epoch`, and `POST`s to `/messages`. The Server resolves the roster and **stores+publishes one copy per member** (excluding the sender) using the existing `user.<memberId>` routing and two-tier inbox. Each member's copy therefore flows through the **identical** hot-tier hold, cold-tier flush, signed-receipt, and `GET /inbox` machinery as a 1:1 message — group delivery is N independent 1:1 deliveries, each cleared by **that member's** own signed receipt. No new broker topology, no group routing key.
+
+**Rotation is the security mechanism (detailed in [MESSAGE_SECURITY.md §6](MESSAGE_SECURITY.md#6-group-encryption-sender-key--rotation)).** Roster admin and rotation are **separate capabilities**. Adding or ejecting *other* members is **owner-only** (`PATCH /groups/{id}/members`) and rotates in the same call (new members get **no** prior history; an ejected member cannot read anything sent after). Rotation itself (`POST /groups/{id}/keys`) is open to **any member**, so forward secrecy can be restored even when the owner is offline. Leaving (`DELETE /groups/{id}/members/me`) is self-service and does **not** rotate by itself — the Server holds no key material; instead the **next member to send** notices the roster changed under the current epoch and rotates before sending, locking the departed member out. Concurrent rotations are serialized by a **compare-and-swap on the epoch** — a write publishing epoch `N+1` is accepted only if the current epoch is exactly `N`, otherwise `409 Conflict`; the loser refetches and retries as `N+2`.
+
+**Key distribution — dedicated channel + single-round-trip pull.** Wrapped keys do **not** ride the message inbox (their retention lifecycle is "keep until the epoch is superseded," not "drop on receipt"). The acting client posts a key set to `POST /groups/{id}/keys` (rotation, any member) or `POST /groups` / `PATCH /groups/{id}/members` (create / roster change, owner). The Server then:
+1. fires a content-free **`groupKeyRotated`** live nudge to each member's `user.<id>` over the existing Hub WebSocket, and
+2. includes any wrapped key a member is missing in the **`groupKeys[]`** array of that member's next `GET /inbox` response — so a reconnecting client gets messages **and** missed keys in one round-trip.
+
+A member that still lacks a key (e.g. a brand-new join) can fetch it directly via `GET /groups/{id}/keys?epoch=`.
+
+```mermaid
+sequenceDiagram
+    participant Owner as Owner PWA
+    participant Server as Server (roster + epoch)
+    participant MQ as RabbitMQ (live fan-out)
+    participant M1 as Member 1
+    participant M2 as Member 2
+
+    Note over Owner,M2: Rotation example - owner removes a member. Any member may rotate.
+    Owner->>Owner: Generate epoch N+1 key, wrap to remaining members
+    Owner->>Server: POST /groups/{id}/keys {epoch: N+1, keys[...]}
+    Server->>Server: CAS: accept only if current epoch == N
+    Server->>MQ: groupKeyRotated nudge -> user.M1, user.M2
+    MQ-->>M1: groupKeyRotated(groupId, N+1)
+    MQ-->>M2: groupKeyRotated(groupId, N+1)
+    M1->>Server: GET /groups/{id}/keys?epoch=N+1 (or via /inbox groupKeys)
+    Server-->>M1: wrapped key for M1
+    Note over Owner,M2: Group message under epoch N+1
+    Owner->>Server: POST /messages {groupId, epoch: N+1, payload, signature}
+    Server->>MQ: Publish user.M1 and user.M2 (one stored copy each)
+```
+
+**Authorization.** The group **owner** is the sole party permitted to change the roster — add or remove other members (`PATCH /groups/{id}/members`). Any member may **send** (validated against the roster), may **leave** (`DELETE /groups/{id}/members/me`), and may **rotate the key** (`POST /groups/{id}/keys`) — so forward secrecy can be restored after a departure without depending on the owner being online.
+
 
 ## 3. Storage Strategy
 
@@ -198,6 +240,7 @@ flowchart TD
     *   **Cold tier (PostgreSQL `inbox`):** the durable store. A message is written here **once**, only if it is not confirmed within the hold window. Rows are deleted strictly upon a verified **signed delivery receipt**. PostgreSQL is required (not a queue) because the inbox needs random access by message id, repeated re-publish of the same message, and `GET /inbox` reads — none of which a FIFO queue provides.
 *   **Reading the inbox (`GET /inbox`):** the Server returns the **union of the hot and cold tiers**, in arrival order; the client de-duplicates by message id. Because the flush from hot to cold is *insert-into-DB then remove-from-memory*, a message in transit is present in **both** tiers (a harmless duplicate) and never in **neither** (no gap).
 *   **PostgreSQL (relational):** also stores Accounts, OAuth identities, the public-key directory, and Web Push subscriptions.
+*   **Group state (PostgreSQL):** the Server persists the group **roster**, the current **epoch** per group, and the opaque **wrapped key blobs** keyed by `(groupId, epoch, recipientId)` (never the group key itself; see [§2.7](#27-group-messaging-sender-key--rotation)). Group messages reuse the two-tier `inbox`; each stored copy additionally carries its `groupId` and `epoch`.
 
 ---
 

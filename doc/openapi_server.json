@@ -27,6 +27,10 @@
     {
       "name": "Keys",
       "description": "User public-key directory: upload and fetch E2E keys"
+    },
+    {
+      "name": "Groups",
+      "description": "Group conversations: roster + epoch management and wrapped group-key distribution"
     }
   ],
   "paths": {
@@ -444,6 +448,223 @@
           },
           "401": { "description": "Unauthorized - Missing or invalid access token" },
           "404": { "description": "User not found or no keys published" }
+        }
+      }
+    },
+    "/groups": {
+      "post": {
+        "tags": ["Groups"],
+        "summary": "Create a group",
+        "description": "Creates a group with the caller as owner.",
+        "operationId": "createGroup",
+        "security": [{ "BearerAuth": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "./models.json#/components/schemas/CreateGroupRequest" }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Group created",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "./models.json#/components/schemas/Group" }
+              }
+            }
+          },
+          "400": { "description": "Malformed request or key set does not cover the roster" },
+          "401": { "description": "Unauthorized - Missing or invalid access token" }
+        }
+      },
+      "get": {
+        "tags": ["Groups"],
+        "summary": "List the caller's groups",
+        "description": "Lists the groups the caller is a member of.",
+        "operationId": "listGroups",
+        "security": [{ "BearerAuth": [] }],
+        "responses": {
+          "200": {
+            "description": "The caller's groups",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": { "$ref": "./models.json#/components/schemas/GroupSummary" }
+                }
+              }
+            }
+          },
+          "401": { "description": "Unauthorized - Missing or invalid access token" }
+        }
+      }
+    },
+    "/groups/{groupId}": {
+      "get": {
+        "tags": ["Groups"],
+        "summary": "Fetch a group's roster and epoch",
+        "description": "Returns a group's roster and current epoch.",
+        "operationId": "getGroup",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [
+          {
+            "name": "groupId",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string", "format": "uuid" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The group descriptor",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "./models.json#/components/schemas/Group" }
+              }
+            }
+          },
+          "401": { "description": "Unauthorized - Missing or invalid access token" },
+          "403": { "description": "Caller is not a member of the group" },
+          "404": { "description": "Group not found" }
+        }
+      }
+    },
+    "/groups/{groupId}/members": {
+      "patch": {
+        "tags": ["Groups"],
+        "summary": "Add/remove members (owner only)",
+        "description": "Adds or removes members and rotates the group key in the same call.",
+        "operationId": "updateGroupMembers",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [
+          {
+            "name": "groupId",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string", "format": "uuid" }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "./models.json#/components/schemas/UpdateMembersRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Roster updated and epoch advanced",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "./models.json#/components/schemas/Group" }
+              }
+            }
+          },
+          "400": { "description": "Key set does not cover the resulting roster" },
+          "401": { "description": "Unauthorized - Missing or invalid access token" },
+          "403": { "description": "Caller is not the group owner" },
+          "404": { "description": "Group not found" },
+          "409": { "description": "Epoch conflict: a concurrent rotation advanced the epoch; refetch and retry" }
+        }
+      }
+    },
+    "/groups/{groupId}/members/me": {
+      "delete": {
+        "tags": ["Groups"],
+        "summary": "Leave a group",
+        "description": "Removes the caller from the group.",
+        "operationId": "leaveGroup",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [
+          {
+            "name": "groupId",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string", "format": "uuid" }
+          }
+        ],
+        "responses": {
+          "204": { "description": "Left the group" },
+          "401": { "description": "Unauthorized - Missing or invalid access token" },
+          "404": { "description": "Group not found or caller not a member" }
+        }
+      }
+    },
+    "/groups/{groupId}/keys": {
+      "post": {
+        "tags": ["Groups"],
+        "summary": "Publish a rotated group key (any member)",
+        "description": "Publishes a new epoch's group key for the current roster.",
+        "operationId": "rotateGroupKey",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [
+          {
+            "name": "groupId",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string", "format": "uuid" }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "./models.json#/components/schemas/GroupKeyDistribution" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Rotation accepted; new epoch is current",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "./models.json#/components/schemas/Group" }
+              }
+            }
+          },
+          "400": { "description": "Key set does not cover the roster" },
+          "401": { "description": "Unauthorized - Missing or invalid access token" },
+          "403": { "description": "Caller is not a member of the group" },
+          "404": { "description": "Group not found" },
+          "409": { "description": "Epoch conflict: a concurrent rotation advanced the epoch; refetch and retry" }
+        }
+      },
+      "get": {
+        "tags": ["Groups"],
+        "summary": "Fetch the caller's wrapped group key for an epoch",
+        "description": "Returns the caller's wrapped group key for an epoch (recovery path).",
+        "operationId": "getGroupKey",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [
+          {
+            "name": "groupId",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string", "format": "uuid" }
+          },
+          {
+            "name": "epoch",
+            "in": "query",
+            "required": false,
+            "description": "The epoch to fetch; defaults to the current epoch.",
+            "schema": { "type": "integer", "format": "int64" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The caller's wrapped key for the epoch",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "./models.json#/components/schemas/GroupKeySet" }
+              }
+            }
+          },
+          "401": { "description": "Unauthorized - Missing or invalid access token" },
+          "403": { "description": "Caller is not a member of the group" },
+          "404": { "description": "Group, epoch, or wrapped key for the caller not found" }
         }
       }
     }

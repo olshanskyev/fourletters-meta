@@ -184,3 +184,47 @@ flowchart TD
 - **In memory:** plaintext exists only transiently and is dropped on logout/lock.
 - **Offline:** history decrypts with the local master key, no network needed.
 - **Lazy:** decryption cost is paid per viewed message, not for the whole archive on load.
+
+---
+
+## 6. Group Encryption (Sender-Key + Rotation)
+
+A 1:1 message uses a fresh per-message ephemeral-ECDH key to one peer ([§4](#4-signing-verifying--decrypting)). That does not scale to N recipients and, more importantly, cannot give the **"a member who leaves can no longer read group messages"** guarantee. Groups therefore use a **sender-key** model: a shared **symmetric group key** tagged with an **epoch** (version), encrypted **once** per message and **rotated** on every membership change. The server-side flow is in [ARCHITECTURE.md §2.7](ARCHITECTURE.md#27-group-messaging-sender-key--rotation); this section is the client crypto.
+
+### 6.1 The group key
+
+- A **256-bit AES-GCM** key generated with WebCrypto **on a member's device** — never on the Server. It is created `extractable: true` **only** so it can be wrapped to other members; the unwrapped key lives in memory and is persisted to IndexedDB **wrapped at rest** (see [§6.4](#64-local-storage-of-group-keys)).
+- Each key is tagged with an **epoch**: a monotonically increasing integer the Server tracks per group. Message ciphertext carries its `epoch` so the recipient picks the matching key.
+
+### 6.2 Wrapping the key to each member (distribution)
+
+The generator wraps the group key to every member using the **same envelope as a 1:1 payload** — fetch the member's **encryption** public key (ECDH P-256) from the directory, generate an ephemeral ECDH key pair, derive an AES-GCM key via HKDF, and AES-GCM-encrypt the raw group-key bytes. The wire `wrappedKey` (Base64) carries `ephemeralPub + IV + ciphertext`, identical in shape to `EncryptedMessage.payload`. The Server stores these opaque blobs by `(groupId, epoch, recipientId)` and **never** sees the group key.
+
+A member **unwraps** by deriving `ECDH(myEncPriv, ephemeralPub) → HKDF → AES-GCM` and decrypting to recover the raw key, then imports it as an AES-GCM `CryptoKey`.
+
+### 6.3 Encrypting & decrypting a group message
+
+- **Send:** AES-GCM-encrypt the plaintext under the current epoch key with a random IV; the wire `payload` is `IV + ciphertext` (Base64). **Sign** the payload with the sender's **identity** key exactly as for 1:1 — group messages are still per-sender authenticated. Set `groupId` + `epoch` and `POST /messages`.
+- **Receive:** read `epoch` from the message, select that epoch's group key (fetch the wrapped blob via the `/inbox` `groupKeys[]` pull or `GET /groups/{id}/keys?epoch=` on a miss, then unwrap), **verify** the sender's identity signature, and AES-GCM-decrypt. Then re-encrypt with the local DB master key and persist as an ordinary `messages` record ([§5](#5-loading-messages-in-the-gui)).
+
+### 6.4 Local storage of group keys
+
+Group keys are persisted **wrapped with the local DB master key** (the same AES-GCM at-rest key from [§1.2](#12-at-rest-encryption-of-the-per-user-db)), keyed by `(groupId, epoch)`, so a member can decrypt historical messages of any epoch it ever held — offline, with no network. A group conversation is an ordinary `conversations` record (`type: 'group'`) plus this per-epoch key map.
+
+### 6.5 Rotation
+
+Rotation is what enforces forward access control. **Any current member may rotate** the key (`POST /groups/{id}/keys`) — it is *not* an owner privilege — so secrecy can be restored even while the owner is offline. Only changing *who is on the roster* (admitting or ejecting other members, `PATCH /members`) stays **owner-only**; leaving (`DELETE /members/me`) is always self-service.
+
+| Trigger | Who acts | Action | Effect |
+| --- | --- | --- | --- |
+| **Member ejected by owner** | Owner | `PATCH /members` removes them and posts epoch `N+1` wrapped to the **remaining** roster (one round-trip) | The ejected member never receives the new key and cannot read anything sent at epoch `N+1` onward. |
+| **Member leaves** | The next member to send | Leaver drops off the roster (no key change yet). The next sender notices the roster changed under epoch `N` and rotates to `N+1` (wrapped to the remaining roster) **before** sending | Forward secrecy is restored on the next group activity without depending on the owner being online. |
+| **Member joins** | Owner | `PATCH /members` adds them and posts epoch `N+1` wrapped to the new roster | The new member receives `N+1` only, so it **cannot** decrypt ciphertext captured at epochs `≤ N` (no prior history). |
+| **Manual rekey** | Any member | Optional manual rotate via `POST /groups/{id}/keys` | Hygiene/recovery. |
+
+> **The window between "leaves" and "next rotation."** A `DELETE /members/me` only unsubscribes the leaver at the Server (it stops fanning new messages to them); their epoch-`N` key is unchanged. So until *some* member rotates, a departed member that still obtains epoch-`N` ciphertext could decrypt it. True forward secrecy begins at the rotation. Making rotation a **member** capability (not owner-only) and having the next sender rotate-before-send keeps that window as short as the group's own activity, with no owner-availability dependency.
+
+**Concurrent rotation is serialized by the epoch (compare-and-swap).** A client publishes epoch `N+1` only if the Server's current epoch is exactly `N`; the first writer wins and a second gets **409 Conflict**, discards its candidate key, refetches the roster/epoch, and retries as `N+2` only if still needed. Because each message carries its epoch tag, recipients always decrypt with the right key even across a rotation boundary.
+
+> **Forward-secrecy granularity.** This is *simple* sender-key (rotate on membership change), the practical Phase 1 choice. Full per-message group ratcheting (MLS / TreeKEM) is heavier and deferred — see [FUTURE_EXTENSIONS.md §10](FUTURE_EXTENSIONS.md#10-group-messaging-sender-key--rotation).
+

@@ -35,12 +35,13 @@
       },
       "subscribe": {
         "summary": "Client receives a live payload from the Hub",
-        "description": "The Hub relays opaque payloads published by the Server with routing key user.{id}: either a new encrypted message or a delivery/read notification for the original sender.",
+        "description": "Relays a live payload to the client: a new message, a delivery/read notification, or a group-key-rotated nudge.",
         "operationId": "receiveFromHub",
         "message": {
           "oneOf": [
             { "$ref": "#/components/messages/MessageEvent" },
-            { "$ref": "#/components/messages/ReceiptEvent" }
+            { "$ref": "#/components/messages/ReceiptEvent" },
+            { "$ref": "#/components/messages/GroupKeyEvent" }
           ]
         }
       }
@@ -69,6 +70,14 @@
         "summary": "A delivery or read notification relayed live to the original sender",
         "payload": {
           "$ref": "./models.json#/components/schemas/ReceiptEvent"
+        }
+      },
+      "GroupKeyEvent": {
+        "name": "GroupKeyEvent",
+        "title": "Group Key Rotated",
+        "summary": "A nudge that a group's key rotated to a new epoch",
+        "payload": {
+          "$ref": "./models.json#/components/schemas/GroupKeyEvent"
         }
       }
     }
