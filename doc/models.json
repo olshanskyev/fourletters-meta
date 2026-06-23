@@ -10,8 +10,8 @@
     "schemas": {
       "ReceiptType": {
         "type": "string",
-        "enum": ["delivered", "read"],
-        "description": "'delivered' = the recipient device received and decrypted the message; 'read' = the user opened it."
+        "enum": ["delivered", "read", "undecryptable"],
+        "description": "'delivered' = the recipient device received and decrypted the message; 'read' = the user opened it; 'undecryptable' = the recipient received it but could not decrypt it (the message was encrypted to a stale public key, e.g. after the recipient logged in on a new device). A negative acknowledgement: it lets the Server drop the retained copy (no one can decrypt it) and prompts the original sender to re-fetch the recipient's current key and resend once."
       },
       "RefreshError": {
         "type": "object",
@@ -93,7 +93,7 @@
           },
           "payload": {
             "type": "string",
-            "description": "E2E encrypted message payload (Base64). For a 1:1 message this is per-message ephemeral-ECDH ciphertext; for a group message it is ciphertext under the group's symmetric epoch key."
+            "description": "E2E encrypted message payload (Base64). Per-message ephemeral-ECDH ciphertext sealed to the recipient's encryption key."
           },
           "signature": {
             "type": "string",
@@ -102,12 +102,7 @@
           "groupId": {
             "type": "string",
             "format": "uuid",
-            "description": "Present only for group messages. Identifies the group; the Server uses it to resolve the roster and fan out one stored copy per member. Omitted for 1:1 messages."
-          },
-          "epoch": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Present only for group messages. The group-key epoch (version) the payload was encrypted under, so the recipient selects the matching key. Omitted for 1:1 messages."
+            "description": "Present only for group messages. Identifies the group so the recipient threads the message into the group conversation. The sender encrypts and sends one independent 1:1 copy per member; the Server treats each copy as an ordinary 1:1 message. Omitted for 1:1 messages."
           }
         }
       },
@@ -149,13 +144,6 @@
               "$ref": "#/components/schemas/MessageReceipt"
             },
             "description": "Pending delivery/read acknowledgements for messages this user sent, accumulated while the user was offline. Returned once and then cleared."
-          },
-          "groupKeys": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/GroupKeySet"
-            },
-            "description": "Wrapped group keys the caller is missing for groups they belong to — e.g. they were offline during a rotation or just joined. Each entry is the current epoch's key wrapped to the caller's encryption key. Folded into the inbox pull so reconnect is a single round-trip. Returned once and then cleared."
           },
           "serverStartedAt": {
             "type": "integer",
@@ -344,45 +332,14 @@
       "ReceiptEvent": {
         "type": "object",
         "required": ["event", "data"],
-        "description": "WS push: a delivery/read notification relayed live to the original sender.",
+        "description": "WS push: a delivery/read/undecryptable notification relayed live to the original sender.",
         "properties": {
           "event": {
             "type": "string",
-            "enum": ["messageDelivered", "messageRead"]
+            "enum": ["messageDelivered", "messageRead", "messageUndecryptable"]
           },
           "data": {
             "$ref": "#/components/schemas/ReceiptData"
-          }
-        }
-      },
-      "GroupKeyEvent": {
-        "type": "object",
-        "required": ["event", "data"],
-        "description": "WS push: a content-free nudge that a group's key rotated to a new epoch. The member refetches its wrapped key (live blob, GET /groups/{id}/keys, or the next /inbox groupKeys pull). The group key itself is never carried over this channel.",
-        "properties": {
-          "event": {
-            "type": "string",
-            "enum": ["groupKeyRotated"]
-          },
-          "data": {
-            "$ref": "#/components/schemas/GroupKeyNotification"
-          }
-        }
-      },
-      "GroupKeyNotification": {
-        "type": "object",
-        "required": ["groupId", "epoch"],
-        "description": "Payload of a groupKeyRotated WS event.",
-        "properties": {
-          "groupId": {
-            "type": "string",
-            "format": "uuid",
-            "description": "The group whose key rotated."
-          },
-          "epoch": {
-            "type": "integer",
-            "format": "int64",
-            "description": "The new current epoch."
           }
         }
       },
@@ -405,8 +362,8 @@
       },
       "Group": {
         "type": "object",
-        "required": ["id", "name", "ownerId", "epoch", "members"],
-        "description": "A group conversation. The Server owns the roster and the current epoch number but never the group key (it only relays opaque wrapped key blobs).",
+        "required": ["id", "name", "ownerId", "members"],
+        "description": "A group conversation. The Server owns the roster; messages are sent as one independent 1:1 copy per member, so the Server never holds any group key material.",
         "properties": {
           "id": {
             "type": "string",
@@ -420,12 +377,7 @@
           "ownerId": {
             "type": "string",
             "format": "uuid",
-            "description": "The group owner — the sole party permitted to change the roster and publish rotations."
-          },
-          "epoch": {
-            "type": "integer",
-            "format": "int64",
-            "description": "The current group-key epoch (version). Incremented on every rotation (membership change or owner-initiated rekey)."
+            "description": "The group owner — the sole party permitted to change the roster."
           },
           "members": {
             "type": "array",
@@ -442,13 +394,13 @@
           "updatedAt": {
             "type": "integer",
             "format": "int64",
-            "description": "Epoch milliseconds of the last roster/epoch change."
+            "description": "Epoch milliseconds of the last roster change."
           }
         }
       },
       "GroupSummary": {
         "type": "object",
-        "required": ["id", "name", "ownerId", "epoch"],
+        "required": ["id", "name", "ownerId"],
         "description": "Lightweight group descriptor for list views.",
         "properties": {
           "id": {
@@ -461,73 +413,13 @@
           "ownerId": {
             "type": "string",
             "format": "uuid"
-          },
-          "epoch": {
-            "type": "integer",
-            "format": "int64"
-          }
-        }
-      },
-      "WrappedGroupKey": {
-        "type": "object",
-        "required": ["recipientId", "wrappedKey"],
-        "description": "The group's symmetric epoch key wrapped (encrypted) to a single member's encryption public key. The Server stores and relays this opaque blob but never the group key itself.",
-        "properties": {
-          "recipientId": {
-            "type": "string",
-            "format": "uuid",
-            "description": "The member this blob is encrypted for."
-          },
-          "wrappedKey": {
-            "type": "string",
-            "description": "The group epoch key wrapped to the member's ECDH encryption key (Base64, same ephemeral-ECDH + AES-GCM envelope used for 1:1 payloads)."
-          }
-        }
-      },
-      "GroupKeySet": {
-        "type": "object",
-        "required": ["groupId", "epoch", "wrappedKey"],
-        "description": "A single member's wrapped group key for one epoch — what the caller pulls to obtain a key it is missing.",
-        "properties": {
-          "groupId": {
-            "type": "string",
-            "format": "uuid",
-            "description": "The group this key belongs to."
-          },
-          "epoch": {
-            "type": "integer",
-            "format": "int64",
-            "description": "The epoch this wrapped key is for."
-          },
-          "wrappedKey": {
-            "type": "string",
-            "description": "The group epoch key wrapped to the caller's encryption key (Base64)."
-          }
-        }
-      },
-      "GroupKeyDistribution": {
-        "type": "object",
-        "required": ["epoch", "keys"],
-        "description": "A complete set of wrapped group keys for one epoch, one entry per member. Generated client-side on create/rotation and posted to the Server, which relays the blobs and advances the roster epoch (compare-and-swap).",
-        "properties": {
-          "epoch": {
-            "type": "integer",
-            "format": "int64",
-            "description": "The epoch these wrapped keys belong to. On rotation this must equal the group's current epoch + 1; the write is rejected (409) if the current epoch is not exactly the prior value."
-          },
-          "keys": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/WrappedGroupKey"
-            },
-            "description": "One wrapped key per member of the (post-change) roster. The Server validates the set covers exactly the roster."
           }
         }
       },
       "CreateGroupRequest": {
         "type": "object",
-        "required": ["name", "members", "keys"],
-        "description": "Creates a group with the caller as owner and an initial epoch-0 key set wrapped to every member.",
+        "required": ["name", "members"],
+        "description": "Creates a group with the caller as owner and the given initial roster.",
         "properties": {
           "name": {
             "type": "string",
@@ -540,20 +432,12 @@
               "format": "uuid"
             },
             "description": "Initial member user ids (the owner is added automatically if omitted)."
-          },
-          "keys": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/WrappedGroupKey"
-            },
-            "description": "Epoch-0 group key wrapped to every initial member (including the owner)."
           }
         }
       },
       "UpdateMembersRequest": {
         "type": "object",
-        "required": ["epoch", "keys"],
-        "description": "Owner-only roster change. Adding and/or removing members always rotates: the body carries the new epoch's full wrapped-key set for the resulting roster. Compare-and-swap on epoch.",
+        "description": "Owner-only roster change.",
         "properties": {
           "add": {
             "type": "array",
@@ -570,18 +454,6 @@
               "format": "uuid"
             },
             "description": "User ids to remove from the roster."
-          },
-          "epoch": {
-            "type": "integer",
-            "format": "int64",
-            "description": "The new epoch (must equal current epoch + 1). Rejected with 409 on mismatch."
-          },
-          "keys": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/WrappedGroupKey"
-            },
-            "description": "The new epoch key wrapped to exactly the resulting roster (after add/remove)."
           }
         }
       },

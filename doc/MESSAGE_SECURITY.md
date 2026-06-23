@@ -94,7 +94,17 @@ Because a **fresh login revokes the user's other sessions** (see [auth.md](algor
 
 When the revoked Device A logs in again, it finds **no key pair**, regenerates one, and uploads it (`PUT /keys`) — which in turn revokes Device B. This “latest login wins” ping-pong is the intended single-device UX (one phone/one session, WhatsApp-style).
 
-> **In-flight loss is inherent.** Any message encrypted to the old public key but not yet decrypted before the key rotates is undecryptable by the new device and lost. This is a property of the single-device model, not of the logout flow; spanning one identity across devices is deferred to [FUTURE_EXTENSIONS.md §9](FUTURE_EXTENSIONS.md#9-multi-device-key-handling).
+**What a new-device login does, end to end:**
+
+1. OAuth succeeds → access token issued → the user's **other session is revoked** ([auth.md](algorithms/auth.md)).
+2. The device finds **no local key pair** and generates a fresh identity + encryption pair.
+3. It publishes the new public keys with `PUT /keys`, **overwriting** the directory entry.
+4. New messages now target the new key; the new device has **no history** and cannot read anything sent to the old key (accepted trade-off — see below).
+5. **On every contact's device,** the next interaction reconciles the changed key and shows *"X's security code changed"* ([§3.1](#31-key-change-detection-security-code-changed)) — auto-accepted, non-blocking.
+6. **Groups:** nothing special. A group message is sent as one independent 1:1 copy per member sealed to that member's *current* directory key ([ARCHITECTURE.md §2.7](ARCHITECTURE.md#27-group-messaging-client-side-11-fan-out)), so the new device simply receives subsequent group messages under its new key like any 1:1. As with 1:1, history that lived only on the old device is not carried over.
+
+> **In-flight messages self-heal via a negative ack.** A message already accepted by the Server but encrypted to the *old* key cannot be read by the new device — its signature verifies but the ECDH/AES-GCM decrypt fails. The new device returns a signed **`undecryptable`** receipt, which makes the Server **drop the retained copy** and relay a NACK to the sender; the sender re-fetches the new key (re-pinning it, [§3.1](#31-key-change-detection-security-code-changed)) and **resends once** under the fresh key. So such a message is *recovered*, not lost — see [ARCHITECTURE.md §2.5](ARCHITECTURE.md#25-delivery-guarantee-server-retained-copy--signed-receipt) and [messages-lifecycle.md](algorithms/messages-lifecycle.md#undecryptable--the-negative-ack). What is genuinely **lost** is only history that lived solely on the old device (never re-sent) — spanning one identity across devices is deferred to [FUTURE_EXTENSIONS.md §9](FUTURE_EXTENSIONS.md#9-multi-device-key-handling).
+
 
 ---
 
@@ -112,9 +122,28 @@ The Server stores and serves public keys only — it is a **directory**, not a k
 | `GET /keys/{userId}` | Bearer JWT | Fetch a user's current public keys to message/verify them. |
 | `GET /keys?ids=…` | Bearer JWT | Batch fetch for multiple contacts. |
 
-The client **caches** fetched public keys in its `contacts` store and refreshes on signature/decryption failure (a key may have rotated). Trust-on-first-use in Phase 1; an out-of-band fingerprint check is a later hardening.
+The client **caches** fetched public keys in its `contacts` store and refreshes on signature/decryption failure (a key may have rotated). Trust-on-first-use in Phase 1; the **key-change detection** below ([§3.1](#31-key-change-detection-security-code-changed)) is the hardening that makes a swapped key *visible*.
 
 > Distinct from the **JWKS** endpoint, which publishes the **Server's** JWT-signing keys for the Hub to validate access tokens — unrelated to user E2E keys.
+
+### 3.1 Key-change detection ("security code changed")
+
+The Server writes the directory, so a malicious/compromised Server *can* publish a fake key. E2EE does not prevent that — it makes it **detectable on the clients**. Each cached contact is **pinned**: alongside its public keys the `contacts` record stores a **fingerprint** `SHA-256(signingPub ‖ encryptionPub)`. Whenever the client newly learns a contact's directory key, it compares the fresh fingerprint to the pinned one.
+
+| First time seen (no pin) | Trust-on-first-use: accept and pin silently. No banner. |
+| --- | --- |
+| Fingerprint **matches** pin | Normal path, nothing shown. |
+| Fingerprint **differs** | **Re-pin** the new key (auto-accept) **and** raise a non-blocking *"X's security code changed"* banner in that conversation (a `system` message). |
+
+Detection is **event-driven — no polling**. The pin is re-checked only on moments that already happen:
+
+- **Inbound signature fails against the pinned key** — the primary detector. `verifySender` re-fetches the contact's key **once**; if the *fresh directory key* verifies the message it is a legitimate rotation (re-pin + banner), otherwise it is a genuine bad signature (drop, do **not** re-pin). This same re-fetch fixes stale 1:1 keys after a peer's device switch.
+- **Server "key changed" nudge** over the existing Hub channel (carries only `{userId}`, never key material) — the client drops the pin so the *next* `getContactKeys` reconciles. The Server can *announce* a change but cannot forge the key undetected, because the client still re-derives and pins the actual directory key.
+
+Groups reuse the identical path per member (a member's `verifySender`), so a member's device switch surfaces as *"Y's security code changed"* in the group and re-pins that member's key for subsequent per-member sends.
+
+> **Level 1 (notice), by design.** The banner is informational and never blocks sending — a new-device login *legitimately* changes the code (see [§2.1](#21-key-lifecycle-logout--single-active-device-policy)). It converts a *silent* server key-swap into a *visible* one. True defeat of a malicious Server needs an **out-of-band** safety-number comparison (Level 2), which single-active-device cannot automate; it is offered only as an optional manual verification.
+
 
 ---
 
@@ -187,44 +216,26 @@ flowchart TD
 
 ---
 
-## 6. Group Encryption (Sender-Key + Rotation)
+## 6. Group Encryption (Client-Side 1:1 Fan-Out)
 
-A 1:1 message uses a fresh per-message ephemeral-ECDH key to one peer ([§4](#4-signing-verifying--decrypting)). That does not scale to N recipients and, more importantly, cannot give the **"a member who leaves can no longer read group messages"** guarantee. Groups therefore use a **sender-key** model: a shared **symmetric group key** tagged with an **epoch** (version), encrypted **once** per message and **rotated** on every membership change. The server-side flow is in [ARCHITECTURE.md §2.7](ARCHITECTURE.md#27-group-messaging-sender-key--rotation); this section is the client crypto.
+A group message is **not** a distinct cryptographic primitive: it is sent as **N independent 1:1 messages**, one per other member, each encrypted with the same per-message ephemeral-ECDH envelope as a direct message ([§4](#4-signing-verifying--decrypting)). There is **no group key, no epoch, and no rotation**. The server-side flow is in [ARCHITECTURE.md §2.7](ARCHITECTURE.md#27-group-messaging-client-side-11-fan-out); this section is the client crypto.
 
-### 6.1 The group key
+### 6.1 Sending
 
-- A **256-bit AES-GCM** key generated with WebCrypto **on a member's device** — never on the Server. It is created `extractable: true` **only** so it can be wrapped to other members; the unwrapped key lives in memory and is persisted to IndexedDB **wrapped at rest** (see [§6.4](#64-local-storage-of-group-keys)).
-- Each key is tagged with an **epoch**: a monotonically increasing integer the Server tracks per group. Message ciphertext carries its `epoch` so the recipient picks the matching key.
+1. Read the group **roster** (`GET /groups/{id}`) to get the member list; drop the sender.
+2. For **each** remaining member, fetch their **encryption** public key from the directory (cached in `contacts`) and build a 1:1 payload exactly as in [§4](#4-signing-verifying--decrypting): ephemeral ECDH → HKDF → AES-GCM, then **sign** the payload with the sender's **identity** key.
+3. `POST /messages` once per member with the **same** `messageId`, that member's `recipientId`, the `groupId`, the per-member `payload`, and the `signature`.
 
-### 6.2 Wrapping the key to each member (distribution)
+Each copy is an ordinary 1:1 message to the Server; the shared `messageId` lets the sender track the group send as one local message, and `groupId` lets each recipient thread it.
 
-The generator wraps the group key to every member using the **same envelope as a 1:1 payload** — fetch the member's **encryption** public key (ECDH P-256) from the directory, generate an ephemeral ECDH key pair, derive an AES-GCM key via HKDF, and AES-GCM-encrypt the raw group-key bytes. The wire `wrappedKey` (Base64) carries `ephemeralPub + IV + ciphertext`, identical in shape to `EncryptedMessage.payload`. The Server stores these opaque blobs by `(groupId, epoch, recipientId)` and **never** sees the group key.
+### 6.2 Receiving
 
-A member **unwraps** by deriving `ECDH(myEncPriv, ephemeralPub) → HKDF → AES-GCM` and decrypting to recover the raw key, then imports it as an AES-GCM `CryptoKey`.
+Identical to a 1:1 message: **verify** the sender's identity signature, **AES-GCM-decrypt** the payload with the recipient's encryption private key, then re-encrypt with the local DB master key and persist as an ordinary `messages` record ([§5](#5-loading-messages-in-the-gui)). The `groupId` selects the group conversation to thread it into.
 
-### 6.3 Encrypting & decrypting a group message
+### 6.3 Membership & new devices
 
-- **Send:** AES-GCM-encrypt the plaintext under the current epoch key with a random IV; the wire `payload` is `IV + ciphertext` (Base64). **Sign** the payload with the sender's **identity** key exactly as for 1:1 — group messages are still per-sender authenticated. Set `groupId` + `epoch` and `POST /messages`.
-- **Receive:** read `epoch` from the message, select that epoch's group key (fetch the wrapped blob via the `/inbox` `groupKeys[]` pull or `GET /groups/{id}/keys?epoch=` on a miss, then unwrap), **verify** the sender's identity signature, and AES-GCM-decrypt. Then re-encrypt with the local DB master key and persist as an ordinary `messages` record ([§5](#5-loading-messages-in-the-gui)).
+- **Roster** is owned by the Server (`groups` + `group_members`); the owner adds/removes members (`PATCH /members`), any member may leave (`DELETE /members/me`). Removing a member simply stops future fan-out to them.
+- **New device:** no special handling. Because every copy is sealed to each member's *current* directory key at send time, a member on a new device receives subsequent group messages under its new key like any 1:1. A copy that raced a key change and fails to decrypt is repaired by the **`undecryptable` negative-ack** ([§2.1](#21-key-lifecycle-logout--single-active-device-policy)).
 
-### 6.4 Local storage of group keys
-
-Group keys are persisted **wrapped with the local DB master key** (the same AES-GCM at-rest key from [§1.2](#12-at-rest-encryption-of-the-per-user-db)), keyed by `(groupId, epoch)`, so a member can decrypt historical messages of any epoch it ever held — offline, with no network. A group conversation is an ordinary `conversations` record (`type: 'group'`) plus this per-epoch key map.
-
-### 6.5 Rotation
-
-Rotation is what enforces forward access control. **Any current member may rotate** the key (`POST /groups/{id}/keys`) — it is *not* an owner privilege — so secrecy can be restored even while the owner is offline. Only changing *who is on the roster* (admitting or ejecting other members, `PATCH /members`) stays **owner-only**; leaving (`DELETE /members/me`) is always self-service.
-
-| Trigger | Who acts | Action | Effect |
-| --- | --- | --- | --- |
-| **Member ejected by owner** | Owner | `PATCH /members` removes them and posts epoch `N+1` wrapped to the **remaining** roster (one round-trip) | The ejected member never receives the new key and cannot read anything sent at epoch `N+1` onward. |
-| **Member leaves** | The next member to send | Leaver drops off the roster (no key change yet). The next sender notices the roster changed under epoch `N` and rotates to `N+1` (wrapped to the remaining roster) **before** sending | Forward secrecy is restored on the next group activity without depending on the owner being online. |
-| **Member joins** | Owner | `PATCH /members` adds them and posts epoch `N+1` wrapped to the new roster | The new member receives `N+1` only, so it **cannot** decrypt ciphertext captured at epochs `≤ N` (no prior history). |
-| **Manual rekey** | Any member | Optional manual rotate via `POST /groups/{id}/keys` | Hygiene/recovery. |
-
-> **The window between "leaves" and "next rotation."** A `DELETE /members/me` only unsubscribes the leaver at the Server (it stops fanning new messages to them); their epoch-`N` key is unchanged. So until *some* member rotates, a departed member that still obtains epoch-`N` ciphertext could decrypt it. True forward secrecy begins at the rotation. Making rotation a **member** capability (not owner-only) and having the next sender rotate-before-send keeps that window as short as the group's own activity, with no owner-availability dependency.
-
-**Concurrent rotation is serialized by the epoch (compare-and-swap).** A client publishes epoch `N+1` only if the Server's current epoch is exactly `N`; the first writer wins and a second gets **409 Conflict**, discards its candidate key, refetches the roster/epoch, and retries as `N+2` only if still needed. Because each message carries its epoch tag, recipients always decrypt with the right key even across a rotation boundary.
-
-> **Forward-secrecy granularity.** This is *simple* sender-key (rotate on membership change), the practical Phase 1 choice. Full per-message group ratcheting (MLS / TreeKEM) is heavier and deferred — see [FUTURE_EXTENSIONS.md §10](FUTURE_EXTENSIONS.md#10-group-messaging-sender-key--rotation).
+> **Security trade-off.** This model gives the same per-message confidentiality and per-sender authenticity as 1:1, and "a removed member stops receiving new messages." It does **not** provide cryptographic forward/backward secrecy across membership changes. A richer sender-key / MLS scheme that adds those guarantees is deferred — see [FUTURE_EXTENSIONS.md §10](FUTURE_EXTENSIONS.md#10-group-sender-keys--rotation). Cost scales as O(N) ciphertexts per message, acceptable for the small groups Phase 1 targets.
 

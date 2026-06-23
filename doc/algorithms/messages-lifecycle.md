@@ -87,7 +87,7 @@ stateDiagram-v2
 - **Recipient offline:** `HotTier → ColdTier` (one write), delivered later via `GET /inbox`, then `ColdTier → Dropped` on the signed receipt.
 - A message in transit during flush is briefly in **both** tiers (harmless duplicate, de-duped by `messageId`) and **never in neither** (persist-then-evict).
 
-## Receipt path (delivered / read)
+## Receipt path (delivered / read / undecryptable)
 
 A receipt carries `originalSenderId`, so relaying it does **not** depend on the retained copy still existing — this is what lets a second receipt (`read` after `delivered`, in any order) still reach the sender. The receipt is published **`mandatory`**: if the sender is **online** it is routed and delivered live (and *nothing* is stored); if the sender is **offline** the broker returns it as unroutable and the Server retains it in `PendingReceipts` for the sender's next `GET /inbox`. This way an online sender never piles up duplicate acks.
 
@@ -108,4 +108,16 @@ flowchart TD
 - **Non-durable on purpose:** a Server restart clears `PendingReceipts`; the sender then detects the restart (`serverStartedAt` changed) and resyncs, which re-drives the receipt.
 - `read` supersedes `delivered` for the same message, so only the latest status per message is retained.
 - Requires `spring.rabbitmq.publisher-returns: true`; only **receipts** are published mandatory (messages stay best-effort, unchanged).
+
+### `undecryptable` — the negative ack
+
+An `undecryptable` receipt travels the **same `recordReceipt` path** — drop the retained copy, relay `mandatory` to the sender — but means the opposite of `delivered`: the recipient got the bytes yet could **not** decrypt them, because the payload was sealed to a **stale public key** (the recipient has since logged in on a new device and rotated keys). Dropping the copy is still correct: *no key in existence can decrypt it*, so re-delivery is futile. The repair happens **end-to-end at the sender**, not on the Server:
+
+1. Recipient's decrypt fails (signature verifies, ECDH/AES-GCM does not) → it returns a signed `undecryptable` receipt instead of `delivered`, then discards the message locally.
+2. Server drops the retained copy and relays the NACK (live, or via `PendingReceipts` if the sender is offline) — identical machinery to a `delivered`.
+3. Sender receives `undecryptable` → re-fetches the recipient's current directory key (which also re-pins it, surfacing *“security code changed”*, see [MESSAGE_SECURITY.md §3.1](../MESSAGE_SECURITY.md#31-key-change-detection-security-code-changed)) → **resends the same `messageId` once** under the fresh key.
+4. The resend is a brand-new copy through the normal hot/cold path; it now decrypts and is cleared by an ordinary `delivered`.
+
+- **Loop-safe:** the sender resends **once per `messageId`**. If the resend is *also* returned `undecryptable`, the payload is treated as undeliverable — the sender stops and surfaces it locally (it is not a key-rotation problem). Without this NACK an undecryptable message would otherwise sit in the cold tier and be re-pulled on every `GET /inbox` forever, since it can never earn a `delivered`.
+- **Server-blind:** the Server never learns *why* — `undecryptable` is just another opaque receipt type it drops-and-relays. No new endpoint, no inbox bookkeeping.
 

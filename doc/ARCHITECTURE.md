@@ -166,70 +166,67 @@ The delivery guarantee does **not** rest on RabbitMQ (a relay may consume a mess
 *   The Server **publishes `user.bob` once** as a best-effort live attempt and keeps the copy (hot tier, then DB). If a **signed** `delivered` receipt arrives, the Server drops the copy. If none arrives within the hold window, it does **not** re-publish — the copy simply flushes to the DB and waits.
 *   During the in-memory hold window the **sender's outbox is the durable backup**, so the hot tier is allowed to be non-durable.
 *   **Backstop (the redelivery mechanism):** whenever Bob's app (re)connects it calls `GET /api/inbox` directly on the Server to pull anything it missed live. This HTTP sync path is independent of any Hub and returns the union of the hot and cold tiers, so a message is always eventually delivered even if the live attempt was missed.
+*   **Undecryptable backstop (negative ack):** if Bob receives the copy but **cannot decrypt** it — it was encrypted to a stale public key after he logged in on a new device — he returns a signed **`undecryptable`** receipt. The Server **drops the retained copy** (no one can decrypt it, so retrying delivery is pointless) and relays the NACK to Alice, who re-fetches Bob's current directory key and **resends once**. This prevents an undecryptable message from looping forever in the inbox (it is never acknowledged by a normal `delivered`). See [MESSAGE_SECURITY.md §2.1](MESSAGE_SECURITY.md#21-key-lifecycle-logout--single-active-device-policy).
+
 
 > Receipts are **signed by the recipient's identity key** and verified against the key directory. In Phase 1 (trusted Hubs) an unsigned receipt would functionally suffice, but the signed form is a deliberate forward-compatible contract: it is what lets untrusted volunteer Hubs be enabled later without changing the wire format. Active *detection* of a misbehaving Hub (inbox state polling, automatic Hub-switching) is deferred — see [FUTURE_EXTENSIONS.md](FUTURE_EXTENSIONS.md).
 
 ### 2.6 Send-Side Reconciliation (Outbox Resync)
 
-> Beyond Phase 1: this signal is retired once the hot tier moves to a persistent Redis store, which survives restarts (see [FUTURE_EXTENSIONS.md](FUTURE_EXTENSIONS.md)).
+> Beyond Phase 1: the resync case of accepted messages is retired once the hot tier moves to a persistent Redis store, which survives restarts (see [FUTURE_EXTENSIONS.md](FUTURE_EXTENSIONS.md)).
 
-A freshly `accepted` message lives only in the hot tier until the hold-window flush, so a Server **restart** within that window loses any copy not yet delivered. Recovery is a single idempotent resend, keyed by `messageId` (the Server upserts — never a duplicate). The trigger is the Server's `serverStartedAt`, returned on every `accepted` and `/inbox` response: if it changed since a message was sent, that message's instance can be gone and the message is resent **once**.
+On app start the client reconciles its outbox of unconfirmed messages. Resends are idempotent — every copy keeps its original `messageId`, so the Server upserts and the recipient de-duplicates; a resend never creates a duplicate. Each unconfirmed message falls into one of two cases:
 
-**Algorithm:**
-1. **On app start** — call `GET /inbox` and save `serverStartedAt` to `localStorage`.
-2. **After `GET /inbox`** — for each `undelivered` message with `retryCount == 0`, compare the `serverStartedAt` stored *on the message* (captured from its `accepted` response) against the one in `localStorage`.
-3. **If they differ** — mark for resync and resend all not delivered once (`POST /messages/batch`), set `retryCount = 1`; otherwise leave it.
+*   **Never accepted (`pending`)** — the initial `POST` never succeeded (offline / error), so the Server does not have the message. It is **re-sent**. If it still cannot be accepted it is marked **`failed`** for the user to resend manually.
+*   **Accepted, but the Server restarted (`accepted`)** — a freshly `accepted` message lives only in the hot tier until the hold-window flush, so a Server restart within that window can lose a not-yet-delivered copy. The trigger is `serverStartedAt`, returned on every `accepted` and `/inbox` response: if it changed since the message was sent, the copy may be gone, so the message is **re-pushed once** (`retryCount = 1`). The Server already had it, so this case is never marked `failed`.
+
+A **group** message is N independent 1:1 copies sharing one `messageId`; if any copy is still unconfirmed it is **re-fanned to the current roster** ([§2.7](#27-group-messaging-client-side-11-fan-out)). Members who already received their copy de-duplicate it; if any copy still fails, the message is marked **`failed`**.
 
 ```mermaid
 flowchart TD
-    Start([App start]) --> Inbox["GET /inbox → save serverStartedAt to localStorage"]
-    Inbox --> Each["For each undelivered message with retryCount == 0"]
-    Each --> Cmp{"message.serverStartedAt<br/>≠ localStorage.serverStartedAt?"}
-    Cmp -- No --> Keep["Leave as-is"]
-    Cmp -- Yes --> Resend["Resend once: POST /messages/batch, set retryCount = 1"]
+    Start([App start]) --> Inbox["GET /inbox → save serverStartedAt"]
+    Inbox --> Each["For each unconfirmed message"]
+    Each --> Kind{"Status?"}
+    Kind -- "pending (never accepted)" --> Resend["Re-send"]
+    Kind -- "accepted + serverStartedAt changed" --> Repush["Re-push once (retryCount = 1)"]
+    Resend --> Ok{"Accepted?"}
+    Ok -- Yes --> Done["Confirmed"]
+    Ok -- No --> Failed["Mark failed → user resends manually"]
 ```
 
-### 2.7 Group Messaging (Sender-Key + Rotation)
+### 2.7 Group Messaging (Client-Side 1:1 Fan-Out)
 
-Phase 1 supports **group conversations** without changing the 1:1 wire format or send path. A 1:1 message encrypts a fresh payload per recipient (ephemeral ECDH, see [MESSAGE_SECURITY.md §4](MESSAGE_SECURITY.md#4-signing-verifying--decrypting)); a group instead shares a **symmetric "sender key"** so a message is encrypted **once** regardless of group size. The two paths coexist: `EncryptedMessage` simply carries an optional `groupId` + `epoch` ([models.json](models.json)), absent for 1:1.
+Phase 1 supports **group conversations** by reusing the 1:1 path verbatim: a group message is sent as **N independent 1:1 messages**, one per other member, each encrypted to that member with the same per-message ephemeral ECDH used for direct messages (see [MESSAGE_SECURITY.md §4](MESSAGE_SECURITY.md#4-signing-verifying--decrypting)). There is **no group key, no epoch, and no rotation**. `EncryptedMessage` carries an optional `groupId` ([models.json](models.json)) so the recipient threads each copy into the right group conversation; it is absent for 1:1.
 
-**Roster & epoch live on the Server; the key never does.** The Server owns the group **roster** (membership) and the current **epoch** number (the key version), but it never holds the group key — it only stores and relays opaque **wrapped key blobs** (the key encrypted to each member's directory encryption key). E2E is preserved: like message payloads, the Server sees only ciphertext.
+**The Server owns the roster only.** It stores group **membership** (`groups` + `group_members`) and never any key material — there is none to hold. The client reads the roster (`GET /groups/{id}`) to know whom to fan out to.
 
-**Key generation is client-side.** The group owner (creator) generates a random 256-bit symmetric key locally, wraps it to every member's encryption public key, and posts the set via `POST /groups`. Every later epoch's key is generated the same way by whichever client rotates (the owner on a roster change, or **any member** on a plain rekey). The Server validates that a key set covers exactly the (post-change) roster and stores the blobs by `(groupId, epoch, recipientId)`.
+**Sending — the client fans out.** To send to a group, the client resolves the roster, and for **each** other member it encrypts and signs an independent 1:1 payload (sealed to that member's directory encryption key) and `POST`s it to `/messages` with the same `messageId`, the member's `recipientId`, and the `groupId`. The Server treats every copy as an ordinary 1:1 message — same `user.<memberId>` routing, two-tier inbox, signed-receipt, and `GET /inbox` machinery. Group delivery is literally N 1:1 deliveries, each cleared by **that member's** own signed receipt. No server fan-out, no broker group topology, no group routing key.
 
-**Sending — Server fan-out per member (reuses the 1:1 path).** To send to a group, the client encrypts once under the current epoch key, signs with its identity key as usual, sets `groupId`+`epoch`, and `POST`s to `/messages`. The Server resolves the roster and **stores+publishes one copy per member** (excluding the sender) using the existing `user.<memberId>` routing and two-tier inbox. Each member's copy therefore flows through the **identical** hot-tier hold, cold-tier flush, signed-receipt, and `GET /inbox` machinery as a 1:1 message — group delivery is N independent 1:1 deliveries, each cleared by **that member's** own signed receipt. No new broker topology, no group routing key.
+**New devices need no special handling.** Because every copy is sealed to the member's *current* directory key at send time, a member who logged in on a new device simply receives messages under their new key. A copy that fails to decrypt (sent to a stale key mid-rotation) is repaired by the existing **undecryptable negative-ack** path ([MESSAGE_SECURITY.md §2.1](MESSAGE_SECURITY.md#21-onboarding--new-device-login)), exactly as for 1:1.
 
-**Rotation is the security mechanism (detailed in [MESSAGE_SECURITY.md §6](MESSAGE_SECURITY.md#6-group-encryption-sender-key--rotation)).** Roster admin and rotation are **separate capabilities**. Adding or ejecting *other* members is **owner-only** (`PATCH /groups/{id}/members`) and rotates in the same call (new members get **no** prior history; an ejected member cannot read anything sent after). Rotation itself (`POST /groups/{id}/keys`) is open to **any member**, so forward secrecy can be restored even when the owner is offline. Leaving (`DELETE /groups/{id}/members/me`) is self-service and does **not** rotate by itself — the Server holds no key material; instead the **next member to send** notices the roster changed under the current epoch and rotates before sending, locking the departed member out. Concurrent rotations are serialized by a **compare-and-swap on the epoch** — a write publishing epoch `N+1` is accepted only if the current epoch is exactly `N`, otherwise `409 Conflict`; the loser refetches and retries as `N+2`.
-
-**Key distribution — dedicated channel + single-round-trip pull.** Wrapped keys do **not** ride the message inbox (their retention lifecycle is "keep until the epoch is superseded," not "drop on receipt"). The acting client posts a key set to `POST /groups/{id}/keys` (rotation, any member) or `POST /groups` / `PATCH /groups/{id}/members` (create / roster change, owner). The Server then:
-1. fires a content-free **`groupKeyRotated`** live nudge to each member's `user.<id>` over the existing Hub WebSocket, and
-2. includes any wrapped key a member is missing in the **`groupKeys[]`** array of that member's next `GET /inbox` response — so a reconnecting client gets messages **and** missed keys in one round-trip.
-
-A member that still lacks a key (e.g. a brand-new join) can fetch it directly via `GET /groups/{id}/keys?epoch=`.
+**Authorization.** The group **owner** is the sole party permitted to change the roster — add or remove other members (`PATCH /groups/{id}/members`). Any member may **send** and may **leave** (`DELETE /groups/{id}/members/me`). Forward/backward secrecy beyond "stop fanning out to a removed member" is **not** provided in this model; a richer scheme is deferred (see [FUTURE_EXTENSIONS.md](FUTURE_EXTENSIONS.md)).
 
 ```mermaid
 sequenceDiagram
-    participant Owner as Owner PWA
-    participant Server as Server (roster + epoch)
+    participant Sender as Sender PWA
+    participant Server as Server (roster only)
     participant MQ as RabbitMQ (live fan-out)
     participant M1 as Member 1
     participant M2 as Member 2
 
-    Note over Owner,M2: Rotation example - owner removes a member. Any member may rotate.
-    Owner->>Owner: Generate epoch N+1 key, wrap to remaining members
-    Owner->>Server: POST /groups/{id}/keys {epoch: N+1, keys[...]}
-    Server->>Server: CAS: accept only if current epoch == N
-    Server->>MQ: groupKeyRotated nudge -> user.M1, user.M2
-    MQ-->>M1: groupKeyRotated(groupId, N+1)
-    MQ-->>M2: groupKeyRotated(groupId, N+1)
-    M1->>Server: GET /groups/{id}/keys?epoch=N+1 (or via /inbox groupKeys)
-    Server-->>M1: wrapped key for M1
-    Note over Owner,M2: Group message under epoch N+1
-    Owner->>Server: POST /messages {groupId, epoch: N+1, payload, signature}
-    Server->>MQ: Publish user.M1 and user.M2 (one stored copy each)
+    Note over Sender,M2: Group send - client encrypts once per member
+    Sender->>Server: GET /groups/{id} (roster)
+    Server-->>Sender: members [M1, M2]
+    Sender->>Sender: Encrypt+sign copy for M1, copy for M2
+    Sender->>Server: POST /messages {messageId, recipientId: M1, groupId, payload_M1, sig}
+    Sender->>Server: POST /messages {messageId, recipientId: M2, groupId, payload_M2, sig}
+    Server->>MQ: Publish user.M1 (one stored copy)
+    Server->>MQ: Publish user.M2 (one stored copy)
+    MQ-->>M1: messageReceived
+    MQ-->>M2: messageReceived
+    M1->>Server: POST /receipts (signed delivery)
+    M2->>Server: POST /receipts (signed delivery)
 ```
-
-**Authorization.** The group **owner** is the sole party permitted to change the roster — add or remove other members (`PATCH /groups/{id}/members`). Any member may **send** (validated against the roster), may **leave** (`DELETE /groups/{id}/members/me`), and may **rotate the key** (`POST /groups/{id}/keys`) — so forward secrecy can be restored after a departure without depending on the owner being online.
 
 
 ## 3. Storage Strategy
@@ -240,7 +237,7 @@ sequenceDiagram
     *   **Cold tier (PostgreSQL `inbox`):** the durable store. A message is written here **once**, only if it is not confirmed within the hold window. Rows are deleted strictly upon a verified **signed delivery receipt**. PostgreSQL is required (not a queue) because the inbox needs random access by message id, repeated re-publish of the same message, and `GET /inbox` reads — none of which a FIFO queue provides.
 *   **Reading the inbox (`GET /inbox`):** the Server returns the **union of the hot and cold tiers**, in arrival order; the client de-duplicates by message id. Because the flush from hot to cold is *insert-into-DB then remove-from-memory*, a message in transit is present in **both** tiers (a harmless duplicate) and never in **neither** (no gap).
 *   **PostgreSQL (relational):** also stores Accounts, OAuth identities, the public-key directory, and Web Push subscriptions.
-*   **Group state (PostgreSQL):** the Server persists the group **roster**, the current **epoch** per group, and the opaque **wrapped key blobs** keyed by `(groupId, epoch, recipientId)` (never the group key itself; see [§2.7](#27-group-messaging-sender-key--rotation)). Group messages reuse the two-tier `inbox`; each stored copy additionally carries its `groupId` and `epoch`.
+*   **Group state (PostgreSQL):** the Server persists only the group **roster** (`groups` + `group_members`); it holds no key material (see [§2.7](#27-group-messaging-client-side-11-fan-out)). A group message reuses the two-tier `inbox` as N independent 1:1 copies, each additionally carrying its `groupId` for recipient-side threading.
 
 ---
 

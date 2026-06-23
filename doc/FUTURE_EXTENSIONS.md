@@ -237,14 +237,16 @@ In Phase 1 a user's E2E key pairs are generated and held on a **single primary d
 
 ---
 
-## 10. Group Messaging (Sender-Key + Rotation on Membership Change)
+## 10. Group Sender-Keys & Rotation
 
-> **Promoted to Phase 1.** Group messaging with the sender-key model is now part of the shipped architecture — see [ARCHITECTURE.md §2.7](ARCHITECTURE.md#27-group-messaging-sender-key--rotation) for the server-side roster/epoch/fan-out flow and [MESSAGE_SECURITY.md §6](MESSAGE_SECURITY.md#6-group-encryption-sender-key--rotation) for the client crypto. Phase 1 policy: the group **owner** is the sole roster admin, and **both** join and removal rotate (new members get no prior history).
+Phase 1 groups are **client-side 1:1 fan-out**: a group message is sent as N independent 1:1 copies, one per member, with no group key (see [ARCHITECTURE.md §2.7](ARCHITECTURE.md#27-group-messaging-client-side-11-fan-out) and [MESSAGE_SECURITY.md §6](MESSAGE_SECURITY.md#6-group-encryption-client-side-11-fan-out)). That is simple and reuses the 1:1 path verbatim, but it costs **O(N) ciphertexts per message** and gives **no cryptographic forward/backward secrecy** across membership changes — a removed member who already captured past ciphertext retains it.
 
-What remains **deferred** here is only the heavier forward-secrecy upgrade:
+A **sender-key** model upgrades both: a shared 256-bit symmetric **group key** tagged with an **epoch**, generated client-side and wrapped to each member's encryption key, so a message is encrypted **once** regardless of group size. The key is **rotated** on membership change — a new member gets only the current epoch (no prior history); a removed member never receives the next epoch (no future reads). The Server owns the roster and current epoch (compare-and-swap to serialize concurrent rotations) and relays opaque wrapped-key blobs, never the key itself. Distribution folds missed keys into the `GET /inbox` pull plus a content-free `groupKeyRotated` WS nudge.
 
-**Full per-message group ratcheting (MLS / TreeKEM).** Simple sender-key (rotate only on membership change) is the Phase 1 choice. Per-message ratcheting gives forward secrecy at message granularity rather than epoch granularity, but is substantially heavier (tree-based key agreement, per-member state) and is deferred unless required. It can replace the sender-key key-agreement layer without changing the roster ownership or the per-member fan-out already in place.
+The hard part this defers is the **new-device / rotation UX** that motivated dropping it from Phase 1: a device that cannot unseal the current epoch (its blob was sealed to a previous device key) must recover by rotation, which only happens on a send — making history readability and "rejoin" non-obvious. A sender-key rollout should pin down that recovery flow first.
 
-Other group-related extensions that compose with the deferred multi-device work ([§9](#9-multi-device-key-handling)): wrapping the group key to **each device** of each member, and richer roster roles (promotable admins) beyond the Phase 1 owner-only model.
+**Full per-message group ratcheting (MLS / TreeKEM).** Beyond simple sender-key, per-message ratcheting gives forward secrecy at message granularity rather than epoch granularity, at substantially higher cost (tree-based key agreement, per-member state). It can replace the sender-key key-agreement layer without changing roster ownership or the per-member fan-out.
+
+Composes with the deferred multi-device work ([§9](#9-multi-device-key-handling)): wrapping the group key to **each device** of each member, and richer roster roles (promotable admins) beyond the owner-only model.
 
 
