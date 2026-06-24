@@ -368,8 +368,8 @@
     "/keys": {
       "put": {
         "tags": ["Keys"],
-        "summary": "Upload or replace caller's public keys",
-        "description": "Authenticated user uploads their current public signing and encryption keys. The server records them in the public key directory. The userId is taken from the authenticated session and any client-provided userId is ignored.",
+        "summary": "Upload or replace caller's Signal pre-key bundle",
+        "description": "Authenticated user uploads their Signal pre-key bundle (identity key, registration id, signed pre-key and a pool of one-time pre-keys), replacing any previous bundle. The userId is taken from the authenticated session.",
         "operationId": "uploadKeys",
         "security": [{ "BearerAuth": [] }],
         "requestBody": {
@@ -421,11 +421,53 @@
         }
       }
     },
+    "/keys/prekeys": {
+      "post": {
+        "tags": ["Keys"],
+        "summary": "Replenish one-time pre-keys",
+        "description": "Appends more one-time pre-keys to the caller's pool when it runs low.",
+        "operationId": "replenishPreKeys",
+        "security": [{ "BearerAuth": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "./models.json#/components/schemas/PreKeysUploadRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Pool replenished" },
+          "400": { "description": "Malformed request" },
+          "401": { "description": "Unauthorized - Missing or invalid access token" }
+        }
+      }
+    },
+    "/keys/prekeys/count": {
+      "get": {
+        "tags": ["Keys"],
+        "summary": "Count caller's remaining one-time pre-keys",
+        "description": "Returns how many one-time pre-keys the caller still has in the directory, so the client can top up below a threshold.",
+        "operationId": "countPreKeys",
+        "security": [{ "BearerAuth": [] }],
+        "responses": {
+          "200": {
+            "description": "Remaining one-time pre-key count",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "./models.json#/components/schemas/PreKeyCountResponse" }
+              }
+            }
+          },
+          "401": { "description": "Unauthorized - Missing or invalid access token" }
+        }
+      }
+    },
     "/keys/{userId}": {
       "get": {
         "tags": ["Keys"],
-        "summary": "Fetch a user's public keys",
-        "description": "Retrieve the current public signing and encryption keys for a single user.",
+        "summary": "Fetch a user's Signal pre-key bundle",
+        "description": "Retrieve a user's pre-key bundle (identity, registration id, signed pre-key and at most one one-time pre-key, which is consumed by this call).",
         "operationId": "getKeysByUserId",
         "security": [{ "BearerAuth": [] }],
         "parameters": [

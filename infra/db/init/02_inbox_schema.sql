@@ -8,7 +8,6 @@ CREATE TABLE __DATABASE_SCHEMA__.inbox (
     recipient_id UUID NOT NULL,
     sender_id    UUID,
     payload      TEXT NOT NULL,
-    signature    TEXT NOT NULL,
     group_id     UUID,
     created_at   TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (message_id, recipient_id)

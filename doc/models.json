@@ -74,7 +74,7 @@
       },
       "EncryptedMessage": {
         "type": "object",
-        "required": ["messageId", "recipientId", "payload", "signature"],
+        "required": ["messageId", "recipientId", "payload"],
         "properties": {
           "messageId": {
             "type": "string",
@@ -93,11 +93,7 @@
           },
           "payload": {
             "type": "string",
-            "description": "E2E encrypted message payload (Base64). Per-message ephemeral-ECDH ciphertext sealed to the recipient's encryption key."
-          },
-          "signature": {
-            "type": "string",
-            "description": "Detached signature over the payload produced by the sender's identity key (Base64). Verified end-to-end by the recipient against the public-key directory."
+            "description": "E2E encrypted Signal ciphertext. Format '<sessionType>.<bodyBase64>' where sessionType is 1 (WhisperMessage, established session) or 3 (PreKeyWhisperMessage, establishes the session). The Server treats it as opaque."
           },
           "groupId": {
             "type": "string",
@@ -233,36 +229,118 @@
           }
         }
       },
+      "SignedPreKeyDto": {
+        "type": "object",
+        "required": ["keyId", "publicKey", "signature"],
+        "description": "A Signal signed pre-key: a medium-lived Curve25519 public key signed by the identity key.",
+        "properties": {
+          "keyId": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Client-assigned id of this signed pre-key."
+          },
+          "publicKey": {
+            "type": "string",
+            "description": "Curve25519 signed pre-key public key (Base64)."
+          },
+          "signature": {
+            "type": "string",
+            "description": "Identity-key signature over the signed pre-key public key (Base64)."
+          }
+        }
+      },
+      "OneTimePreKeyDto": {
+        "type": "object",
+        "required": ["keyId", "publicKey"],
+        "description": "A Signal one-time pre-key, consumed once when a peer opens a session.",
+        "properties": {
+          "keyId": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Client-assigned id of this one-time pre-key."
+          },
+          "publicKey": {
+            "type": "string",
+            "description": "Curve25519 one-time pre-key public key (Base64)."
+          }
+        }
+      },
       "KeysUploadRequest": {
         "type": "object",
-        "required": ["signingPublicKey", "encryptionPublicKey"],
+        "required": ["registrationId", "identityKey", "signedPreKey", "oneTimePreKeys"],
+        "description": "Uploads the caller's Signal pre-key bundle (identity, registration id, signed pre-key, and a pool of one-time pre-keys), replacing any previous bundle. Sent on first login of a new device.",
         "properties": {
-          "signingPublicKey": {
-            "type": "string",
-            "description": "The caller's ECDSA P-256 public signing key (Base64 SPKI)."
+          "registrationId": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The caller's Signal registration id."
           },
-          "encryptionPublicKey": {
+          "identityKey": {
             "type": "string",
-            "description": "The caller's ECDH P-256 public encryption key (Base64 SPKI)."
+            "description": "The caller's long-lived Curve25519 identity public key (Base64)."
+          },
+          "signedPreKey": {
+            "$ref": "#/components/schemas/SignedPreKeyDto"
+          },
+          "oneTimePreKeys": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/OneTimePreKeyDto"
+            },
+            "description": "Initial pool of one-time pre-keys; the server hands one out per session and deletes it."
+          }
+        }
+      },
+      "PreKeysUploadRequest": {
+        "type": "object",
+        "required": ["oneTimePreKeys"],
+        "description": "Replenishes the caller's pool of one-time pre-keys when it runs low.",
+        "properties": {
+          "oneTimePreKeys": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/OneTimePreKeyDto"
+            },
+            "description": "Additional one-time pre-keys to append to the caller's pool."
+          }
+        }
+      },
+      "PreKeyCountResponse": {
+        "type": "object",
+        "required": ["count"],
+        "description": "How many one-time pre-keys the caller still has in the directory, so the client can top up below a threshold.",
+        "properties": {
+          "count": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Remaining one-time pre-keys in the caller's pool."
           }
         }
       },
       "PublicKeySet": {
         "type": "object",
-        "required": ["signingPublicKey", "encryptionPublicKey", "uploadedAt"],
+        "required": ["registrationId", "identityKey", "signedPreKey", "uploadedAt"],
+        "description": "A user's Signal pre-key bundle as served by the directory: identity, registration id, signed pre-key, and at most one one-time pre-key (absent when the pool is exhausted).",
         "properties": {
-          "signingPublicKey": {
-            "type": "string",
-            "description": "ECDSA P-256 public signing key (Base64 SPKI)."
+          "registrationId": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The user's Signal registration id."
           },
-          "encryptionPublicKey": {
+          "identityKey": {
             "type": "string",
-            "description": "ECDH P-256 public encryption key (Base64 SPKI)."
+            "description": "Long-lived Curve25519 identity public key (Base64)."
+          },
+          "signedPreKey": {
+            "$ref": "#/components/schemas/SignedPreKeyDto"
+          },
+          "oneTimePreKey": {
+            "$ref": "#/components/schemas/OneTimePreKeyDto"
           },
           "uploadedAt": {
             "type": "integer",
             "format": "int64",
-            "description": "Epoch milliseconds when these public keys were uploaded to the directory."
+            "description": "Epoch milliseconds when this bundle was uploaded to the directory."
           }
         }
       },

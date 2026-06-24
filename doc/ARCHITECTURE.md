@@ -42,7 +42,7 @@ flowchart TD
 *   **Angular PWA:** The user interface. Uses WebCrypto for E2E encryption and IndexedDB for local storage of messages and keys. Maintains an **outbox**: an outgoing message is held locally until the sender receives a cryptographically **signed delivery receipt** from the recipient, which makes the client tolerant of an unreliable relay without any blind retry loop.
 *   **Server (Spring Boot):** The control plane **and the trusted owner of the message inbox**. Handles OAuth linking, validates identity, manages the public-key directory, accepts outgoing messages, holds them durably until a signed receipt arrives, publishes them to RabbitMQ for live delivery, exposes the `/inbox` sync API, and triggers push notifications. The Server is the only component trusted for delivery (never for content — payloads are E2E encrypted).
 *   **Hub (Lightweight Spring Boot):** The **live delivery relay**. It holds the long-lived WebSocket connections of online users and forwards already-accepted, E2E-encrypted payloads from RabbitMQ to the recipient. It evaluates stateless JWTs (fetching the Server's public keys via the JWKS endpoint) only to authorize *which user's* live stream a connection may receive. It has **no database access** and holds no durable state — the delivery guarantee never depends on it. In Phase 1 the Hub runs in the trusted environment alongside the Server; it is nonetheless built as a blind, replaceable relay so that untrusted third-party ("volunteer") Hubs can be enabled later without a redesign (see [FUTURE_EXTENSIONS.md](FUTURE_EXTENSIONS.md)).
-*   **PostgreSQL:** Stores user accounts, OAuth linking, public keys, and the **durable inbox** (cold tier) of accepted-but-not-yet-confirmed messages.
+*   **PostgreSQL:** Stores user accounts, OAuth linking, Signal pre-key bundles, and the **durable inbox** (cold tier) of accepted-but-not-yet-confirmed messages.
 *   **RabbitMQ:** A **non-durable live fan-out bus**. It routes accepted payloads to whichever Hub a recipient is currently connected to. It is explicitly *not* a durability mechanism — losing a message in RabbitMQ is harmless because the Server retains the source of truth.
 
 ---
@@ -85,7 +85,7 @@ The refresh backend is called at the every first start of app and upon or just b
 
 ### 2.3 E2E Encryption & Key Exchange
 
-Messages are encrypted on the client side. The server acts as a Public Key directory.
+Messages are protected end-to-end with the **Signal protocol** (X3DH + Double Ratchet). The server acts as a **pre-key directory**.
 
 ```mermaid
 sequenceDiagram
@@ -95,18 +95,19 @@ sequenceDiagram
     participant Bob as Bob PWA
 
     Note over Alice,Bob: Initial Setup
-    Alice->>Alice: Generate WebCrypto KeyPair
-    Alice->>Server: Upload Alice's Public Key
-    Server->>DB: Store Alice's Public Key
-    Bob->>Bob: Generate WebCrypto KeyPair
-    Bob->>Server: Upload Bob's Public Key
-    Server->>DB: Store Bob's Public Key
+    Alice->>Alice: Generate Signal identity + pre-keys
+    Alice->>Server: Upload Alice's pre-key bundle (PUT /keys)
+    Server->>DB: Store Alice's bundle
+    Bob->>Bob: Generate Signal identity + pre-keys
+    Bob->>Server: Upload Bob's pre-key bundle (PUT /keys)
+    Server->>DB: Store Bob's bundle
 
-    Note over Alice,Bob: Exchanging Keys
-    Alice->>Server: Request Bob's Public Key
-    Server->>DB: Query
+    Note over Alice,Bob: Opening a session
+    Alice->>Server: Request Bob's pre-key bundle
+    Server->>DB: Query (pop one one-time pre-key)
     DB-->>Server: Result
-    Server-->>Alice: Return Bob's Public Key
+    Server-->>Alice: Return Bob's bundle
+    Alice->>Alice: X3DH → Double Ratchet session
 ```
 
 ### 2.4 Message Sending & Receiving (Server-Owned Inbox)
@@ -116,7 +117,7 @@ For a detailed block diagram of the live fan-out topology, refer to [algorithms/
 The delivery model separates the **send path** (trusted, durable) from the **receive path** (untrusted, best-effort), so that an untrusted Hub can never cause permanent message loss and the sender never has to blindly retry.
 
 **Send path (always through the Server):**
-1. Alice encrypts the message with Bob's public key and **signs** it with her identity key.
+1. Alice encrypts the message through her **Double Ratchet** session with Bob (opening one from his pre-key bundle on first contact). The ratchet authenticates the message, so chat messages carry no separate signature.
 2. Alice's PWA `POST`s it to the **Server** and keeps a copy in its local **outbox**.
 3. The Server holds the message in its **hot tier** (in-memory pending map; see [3](#3-storage-strategy)) and **publishes** it to RabbitMQ with routing key `user.bob`. The Server returns an **`accepted`** response — Alice's send call is now complete (fire-and-forget; no client retry loop).
 
@@ -166,7 +167,7 @@ The delivery guarantee does **not** rest on RabbitMQ (a relay may consume a mess
 *   The Server **publishes `user.bob` once** as a best-effort live attempt and keeps the copy (hot tier, then DB). If a **signed** `delivered` receipt arrives, the Server drops the copy. If none arrives within the hold window, it does **not** re-publish — the copy simply flushes to the DB and waits.
 *   During the in-memory hold window the **sender's outbox is the durable backup**, so the hot tier is allowed to be non-durable.
 *   **Backstop (the redelivery mechanism):** whenever Bob's app (re)connects it calls `GET /api/inbox` directly on the Server to pull anything it missed live. This HTTP sync path is independent of any Hub and returns the union of the hot and cold tiers, so a message is always eventually delivered even if the live attempt was missed.
-*   **Undecryptable backstop (negative ack):** if Bob receives the copy but **cannot decrypt** it — it was encrypted to a stale public key after he logged in on a new device — he returns a signed **`undecryptable`** receipt. The Server **drops the retained copy** (no one can decrypt it, so retrying delivery is pointless) and relays the NACK to Alice, who re-fetches Bob's current directory key and **resends once**. This prevents an undecryptable message from looping forever in the inbox (it is never acknowledged by a normal `delivered`). See [MESSAGE_SECURITY.md §2.1](MESSAGE_SECURITY.md#21-key-lifecycle-logout--single-active-device-policy).
+*   **Undecryptable backstop (negative ack):** if Bob receives the copy but **cannot decrypt** it — it was sealed to a stale identity / pre-key after he logged in on a new device — he returns a signed **`undecryptable`** receipt. The Server **drops the retained copy** (no one can decrypt it, so retrying delivery is pointless) and relays the NACK to Alice, who re-fetches Bob's current bundle and **resends once** under a fresh session. This prevents an undecryptable message from looping forever in the inbox (it is never acknowledged by a normal `delivered`). See [MESSAGE_SECURITY.md §2.1](MESSAGE_SECURITY.md#21-key-lifecycle-logout--single-active-device-policy).e-policy).
 
 
 > Receipts are **signed by the recipient's identity key** and verified against the key directory. In Phase 1 (trusted Hubs) an unsigned receipt would functionally suffice, but the signed form is a deliberate forward-compatible contract: it is what lets untrusted volunteer Hubs be enabled later without changing the wire format. Active *detection* of a misbehaving Hub (inbox state polling, automatic Hub-switching) is deferred — see [FUTURE_EXTENSIONS.md](FUTURE_EXTENSIONS.md).
@@ -180,7 +181,7 @@ On app start the client reconciles its outbox of unconfirmed messages. Resends a
 *   **Never accepted (`pending`)** — the initial `POST` never succeeded (offline / error), so the Server does not have the message. It is **re-sent**. If it still cannot be accepted it is marked **`failed`** for the user to resend manually.
 *   **Accepted, but the Server restarted (`accepted`)** — a freshly `accepted` message lives only in the hot tier until the hold-window flush, so a Server restart within that window can lose a not-yet-delivered copy. The trigger is `serverStartedAt`, returned on every `accepted` and `/inbox` response: if it changed since the message was sent, the copy may be gone, so the message is **re-pushed once** (`retryCount = 1`). The Server already had it, so this case is never marked `failed`.
 
-A **group** message is N independent 1:1 copies sharing one `messageId`; if any copy is still unconfirmed it is **re-fanned to the current roster** ([§2.7](#27-group-messaging-client-side-11-fan-out)). Members who already received their copy de-duplicate it; if any copy still fails, the message is marked **`failed`**.
+A **group** message is N independent 1:1 copies sharing one `messageId`; if any copy is still unconfirmed (sending fails) it is **re-fanned to the current roster** ([§2.7](#27-group-messaging-client-side-11-fan-out)). Members who already received their copy de-duplicate it; if any copy still fails, the message is marked **`failed`**.
 
 ```mermaid
 flowchart TD
@@ -196,13 +197,13 @@ flowchart TD
 
 ### 2.7 Group Messaging (Client-Side 1:1 Fan-Out)
 
-Phase 1 supports **group conversations** by reusing the 1:1 path verbatim: a group message is sent as **N independent 1:1 messages**, one per other member, each encrypted to that member with the same per-message ephemeral ECDH used for direct messages (see [MESSAGE_SECURITY.md §4](MESSAGE_SECURITY.md#4-signing-verifying--decrypting)). There is **no group key, no epoch, and no rotation**. `EncryptedMessage` carries an optional `groupId` ([models.json](models.json)) so the recipient threads each copy into the right group conversation; it is absent for 1:1.
+Phase 1 supports **group conversations** by reusing the 1:1 path verbatim: a group message is sent as **N independent 1:1 messages**, one per other member, each sent through that member's own **Double Ratchet** session exactly like a direct message (see [MESSAGE_SECURITY.md §6](MESSAGE_SECURITY.md#6-group-encryption-client-side-11-fan-out)). `EncryptedMessage` carries an optional `groupId` ([models.json](models.json)) so the recipient threads each copy into the right group conversation; it is absent for 1:1.
 
 **The Server owns the roster only.** It stores group **membership** (`groups` + `group_members`) and never any key material — there is none to hold. The client reads the roster (`GET /groups/{id}`) to know whom to fan out to.
 
-**Sending — the client fans out.** To send to a group, the client resolves the roster, and for **each** other member it encrypts and signs an independent 1:1 payload (sealed to that member's directory encryption key) and `POST`s it to `/messages` with the same `messageId`, the member's `recipientId`, and the `groupId`. The Server treats every copy as an ordinary 1:1 message — same `user.<memberId>` routing, two-tier inbox, signed-receipt, and `GET /inbox` machinery. Group delivery is literally N 1:1 deliveries, each cleared by **that member's** own signed receipt. No server fan-out, no broker group topology, no group routing key.
+**Sending — the client fans out.** To send to a group, the client resolves the roster, and for **each** other member it ratchet-encrypts an independent 1:1 payload through that member's session and `POST`s it to `/messages` with the same `messageId`, the member's `recipientId`, and the `groupId`. The Server treats every copy as an ordinary 1:1 message — same `user.<memberId>` routing, two-tier inbox, signed-receipt, and `GET /inbox` machinery. Group delivery is literally N 1:1 deliveries, each cleared by **that member's** own signed receipt. No server fan-out, no broker group topology, no group routing key.
 
-**New devices need no special handling.** Because every copy is sealed to the member's *current* directory key at send time, a member who logged in on a new device simply receives messages under their new key. A copy that fails to decrypt (sent to a stale key mid-rotation) is repaired by the existing **undecryptable negative-ack** path ([MESSAGE_SECURITY.md §2.1](MESSAGE_SECURITY.md#21-onboarding--new-device-login)), exactly as for 1:1.
+**New devices need no special handling.** Because every copy goes through the member's *current* session at send time, a member who logged in on a new device simply receives subsequent messages under their new identity. A copy that fails to decrypt (raced a key change mid-rotation) is repaired by the existing **undecryptable negative-ack** path ([MESSAGE_SECURITY.md §2.1](MESSAGE_SECURITY.md#21-key-lifecycle-logout--single-active-device-policy)), exactly as for 1:1.
 
 **Authorization.** The group **owner** is the sole party permitted to change the roster — add or remove other members (`PATCH /groups/{id}/members`). Any member may **send** and may **leave** (`DELETE /groups/{id}/members/me`). Forward/backward secrecy beyond "stop fanning out to a removed member" is **not** provided in this model; a richer scheme is deferred (see [FUTURE_EXTENSIONS.md](FUTURE_EXTENSIONS.md)).
 
@@ -231,7 +232,7 @@ sequenceDiagram
 
 ## 3. Storage Strategy
 
-*   **Client (Angular):** **IndexedDB** is used for storing the user's private key, cached public keys of contacts, decrypted chat history, and the **outbox** of unconfirmed outgoing messages.
+*   **Client (Angular):** **IndexedDB** is used for storing the user's Signal keys and per-contact ratchet session state, cached identity keys of contacts, decrypted chat history, and the **outbox** of unconfirmed outgoing messages.
 *   **Server — two-tier inbox:** The Server owns the message inbox as the source of truth, split into a hot and a cold tier to keep database operations low:
     *   **Hot tier (in-memory pending map):** holds messages only during the short post-accept hold window, keyed by message id. It is **discardable** — durability during the window is provided by the **sender's outbox**, so the hot tier is plain **JVM heap** in the single Server instance. The hold window length `N` is a tunable knob that trades memory for database writes: messages confirmed by a signed receipt within `N` cost **zero** DB writes; lowering `N` reduces memory at the cost of writing sooner. (Sharing this tier across multiple Server instances via Redis is a deferred concern — see [FUTURE_EXTENSIONS.md](FUTURE_EXTENSIONS.md).)
     *   **Cold tier (PostgreSQL `inbox`):** the durable store. A message is written here **once**, only if it is not confirmed within the hold window. Rows are deleted strictly upon a verified **signed delivery receipt**. PostgreSQL is required (not a queue) because the inbox needs random access by message id, repeated re-publish of the same message, and `GET /inbox` reads — none of which a FIFO queue provides.
