@@ -125,7 +125,7 @@ flowchart TD
     MQ -->|Live fan-out| HN
 ```
 
-The Hub tier scales horizontally **independently of the Server** — a single Server instance can drive many Hubs. WebSocket traffic uses a "Least Connections" algorithm; sticky sessions are not required because RabbitMQ is the unified fan-out backplane.
+Hub scaling is unchanged from Phase 1 (Hubs already scale horizontally independently of the Server, see [ARCHITECTURE.md §4](ARCHITECTURE.md#4-deployment-model-phase-1)); the only delta this section adds is the shared Redis hot tier that lets the **Server** tier grow past one instance.
 
 ---
 
@@ -248,5 +248,22 @@ The hard part this defers is the **new-device / rotation UX** that motivated dro
 **Full per-message group ratcheting (MLS / TreeKEM).** Beyond simple sender-key, per-message ratcheting gives forward secrecy at message granularity rather than epoch granularity, at substantially higher cost (tree-based key agreement, per-member state). It can replace the sender-key key-agreement layer without changing roster ownership or the per-member fan-out.
 
 Composes with the deferred multi-device work ([§9](#9-multi-device-key-handling)): wrapping the group key to **each device** of each member, and richer roster roles (promotable admins) beyond the owner-only model.
+
+---
+
+## 11. Signed Pre-Key Rotation
+
+In Phase 1 the **signed pre-key** is generated once at first authentication with a fixed id and only ever changes when the whole identity is regenerated (new-device reset) — see [MESSAGE_SECURITY.md §2](MESSAGE_SECURITY.md#2-keys-created-at-first-authentication). It is *meant* to be the **medium-lived** key in Signal's design, rotated every few days, but Phase 1 does **not** rotate it, so in practice its lifetime equals the identity's.
+
+The signed pre-key only protects the **initial** message of a session opened while the sender's **one-time pre-key pool is exhausted** (X3DH then falls back to identity + signed pre-key, with no disposable key mixed in). With a one-time pre-key present — the normal case — rotation adds little, and it never affects an **established** session (those are protected by the Double Ratchet). Not rotating therefore widens the exposure window for that narrow fallback case from "a few days" to "forever." This is a **hardening** item, not a correctness gap: messaging is fully E2E-secure without it.
+
+A rollout is **client-driven** (only the client holds the signed pre-key's private half and the identity key needed to sign it) and folds into the existing one-time-pool watermark check on startup:
+
+1. **Rotate on a TTL** (e.g. 2–7 days): generate a fresh signed pre-key with an **incremented id**, store it, record `generatedAt`, and re-upload the bundle with `PUT /keys`.
+2. **Retain the previous signed pre-key** for a **grace window** (Signal keeps it ~30 days). `loadSignedPreKey(keyId)` must resolve **both** the current and the retained previous id, because an in-flight `PreKeyWhisperMessage` names the `signedPreKeyId` the sender used. Without retention, every rotation opens a brief window where in-flight session-opens fail → NACK → re-key (recoverable but wasteful).
+3. **Cleanup is part of the rotation routine, not a separate cleaner.** When rotating to id *N+1*, keep *N* for the grace window and drop *N−1* via `removeSignedPreKey` — tying deletion to the rotation tick (which already knows ages) is simpler and safer than a sweeper, and never deletes a key an active in-flight open still references.
+
+**No server-side work.** The `public_keys` row holds a **single** signed-pre-key triple that is simply **overwritten** on each `PUT /keys`; the server never accumulates old signed pre-keys, so there is **no DB-cleaner job and no schema change** — all retention/cleanup lives on the client.
+
 
 

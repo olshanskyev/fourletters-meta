@@ -83,6 +83,8 @@ On the user's **first** authenticated session on a device, the PWA generates a f
 
 The identity key, signed pre-key and one-time pre-keys together form the **pre-key bundle** uploaded to the directory ([§3](#3-server-as-public-key-directory)); a peer fetches it to open a Double Ratchet session. **Per-contact session state** — the ratchet keys that evolve as messages flow — is created on first contact and kept in `signalSessions`; it is **never** uploaded. Signal derives all message keys internally from one identity, so there is no longer a separate signing-vs-encryption key pair as in earlier versions.
 
+> **Signed pre-key rotation is deferred.** Phase 1 generates the signed pre-key once and rotates it only on a new-device reset (not on the medium-lived TTL Signal intends); periodic rotation with a grace window is deferred to [FUTURE_EXTENSIONS.md §11](FUTURE_EXTENSIONS.md#11-signed-pre-key-rotation).
+
 The PWA keeps the one-time pre-key pool topped up: on startup it calls `GET /keys/prekeys/count` and, when the remaining count is below a low-watermark, generates a new batch and appends it with `POST /keys/prekeys` ([§3](#3-server-as-public-key-directory)).
 
 ### 2.1 Key lifecycle, logout & single-active-device policy
