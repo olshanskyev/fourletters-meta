@@ -31,6 +31,10 @@
     {
       "name": "Groups",
       "description": "Group conversations: roster management"
+    },
+    {
+      "name": "Users",
+      "description": "User profile directory: display name and avatar lookups"
     }
   ],
   "paths": {
@@ -490,6 +494,65 @@
           },
           "401": { "description": "Unauthorized - Missing or invalid access token" },
           "404": { "description": "User not found or no keys published" }
+        }
+      }
+    },
+    "/users": {
+      "get": {
+        "tags": ["Users"],
+        "summary": "Batch fetch user profiles",
+        "description": "Fetch public profiles (display name and avatar) for multiple users via a comma-separated `ids` query parameter. Unknown ids are omitted from the result.",
+        "operationId": "getUsersBatch",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [
+          {
+            "name": "ids",
+            "in": "query",
+            "required": true,
+            "description": "Comma-separated list of user ids to fetch profiles for",
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Public profiles for the requested users",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "./models.json#/components/schemas/UserBatchResponse" }
+              }
+            }
+          },
+          "401": { "description": "Unauthorized - Missing or invalid access token" }
+        }
+      }
+    },
+    "/users/{userId}": {
+      "get": {
+        "tags": ["Users"],
+        "summary": "Fetch a user's public profile",
+        "description": "Retrieve a single user's public profile (display name and avatar).",
+        "operationId": "getUser",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [
+          {
+            "name": "userId",
+            "in": "path",
+            "required": true,
+            "description": "ID of the user whose profile is requested",
+            "schema": { "type": "string", "format": "uuid" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The user's public profile",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "./models.json#/components/schemas/PublicUser" }
+              }
+            }
+          },
+          "401": { "description": "Unauthorized - Missing or invalid access token" },
+          "404": { "description": "User not found" }
         }
       }
     },

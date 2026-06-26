@@ -72,6 +72,40 @@
           }
         }
       },
+      "PublicUser": {
+        "type": "object",
+        "required": ["id"],
+        "description": "A user's public profile as served by the directory: the display name and avatar shown to other users. Contains no roles or private account data.",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The user id this profile belongs to."
+          },
+          "username": {
+            "type": "string",
+            "description": "The user's public display name."
+          },
+          "avatarUrl": {
+            "type": "string",
+            "format": "uri",
+            "description": "URL of the user's avatar image, if set."
+          }
+        }
+      },
+      "UserBatchResponse": {
+        "type": "object",
+        "required": ["users"],
+        "description": "Public profiles for a batch of requested user ids. Missing/unknown ids are simply omitted.",
+        "properties": {
+          "users": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PublicUser"
+            }
+          }
+        }
+      },
       "EncryptedMessage": {
         "type": "object",
         "required": ["messageId", "recipientId", "payload"],
@@ -229,7 +263,7 @@
           }
         }
       },
-      "SignedPreKeyDto": {
+      "SignedPreKey": {
         "type": "object",
         "required": ["keyId", "publicKey", "signature"],
         "description": "A Signal signed pre-key: a medium-lived Curve25519 public key signed by the identity key.",
@@ -249,7 +283,7 @@
           }
         }
       },
-      "OneTimePreKeyDto": {
+      "OneTimePreKey": {
         "type": "object",
         "required": ["keyId", "publicKey"],
         "description": "A Signal one-time pre-key, consumed once when a peer opens a session.",
@@ -280,12 +314,12 @@
             "description": "The caller's long-lived Curve25519 identity public key (Base64)."
           },
           "signedPreKey": {
-            "$ref": "#/components/schemas/SignedPreKeyDto"
+            "$ref": "#/components/schemas/SignedPreKey"
           },
           "oneTimePreKeys": {
             "type": "array",
             "items": {
-              "$ref": "#/components/schemas/OneTimePreKeyDto"
+              "$ref": "#/components/schemas/OneTimePreKey"
             },
             "description": "Initial pool of one-time pre-keys; the server hands one out per session and deletes it."
           }
@@ -299,7 +333,7 @@
           "oneTimePreKeys": {
             "type": "array",
             "items": {
-              "$ref": "#/components/schemas/OneTimePreKeyDto"
+              "$ref": "#/components/schemas/OneTimePreKey"
             },
             "description": "Additional one-time pre-keys to append to the caller's pool."
           }
@@ -332,10 +366,10 @@
             "description": "Long-lived Curve25519 identity public key (Base64)."
           },
           "signedPreKey": {
-            "$ref": "#/components/schemas/SignedPreKeyDto"
+            "$ref": "#/components/schemas/SignedPreKey"
           },
           "oneTimePreKey": {
-            "$ref": "#/components/schemas/OneTimePreKeyDto"
+            "$ref": "#/components/schemas/OneTimePreKey"
           },
           "uploadedAt": {
             "type": "integer",
