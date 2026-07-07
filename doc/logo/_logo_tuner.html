@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>fourletters logo2 tuner</title><style>
+  body{background:#2b2b2b;font-family:sans-serif;color:#eee;margin:0;padding:20px}
+  .wrap{display:flex;gap:32px;align-items:flex-start;flex-wrap:wrap}
+  .controls{min-width:300px}
+  .controls label{display:block;margin:12px 0 4px;font-size:13px}
+  .controls input[type=range]{width:240px;vertical-align:middle}
+  .val{display:inline-block;width:48px;text-align:right;font-variant-numeric:tabular-nums}
+  .preview{background:#444;padding:16px;border-radius:12px}
+  .sizes{display:flex;gap:16px;align-items:flex-end;margin-top:12px}
+  .sizes figure{margin:0;text-align:center}
+  .sizes figcaption{font-size:11px;color:#aaa;margin-top:4px}
+  .sizes .px{background:#fff;image-rendering:pixelated;border-radius:4px}
+  h1{font-size:16px;font-weight:600;margin:0 0 12px}
+  h2{font-size:13px;font-weight:600;margin:18px 0 6px;color:#9cdcfe}
+  textarea{width:520px;height:220px;background:#1e1e1e;color:#9cdcfe;border:1px solid #555;border-radius:6px;font-family:monospace;font-size:12px;padding:8px}
+  button{margin-top:8px;padding:6px 12px;background:#00A2E8;border:none;border-radius:6px;color:#fff;cursor:pointer}
+  table{border-collapse:collapse;font-size:12px;margin-top:4px}
+  th,td{border:1px solid #555;padding:3px 8px;text-align:right}
+  th{color:#aaa;font-weight:500}
+  td.name{text-align:left}
+  .ok{color:#7ee787}
+  .warn{color:#ffab70}
+  .bad{color:#ff7b72}
+  .note{font-size:11px;color:#999;margin-top:6px;max-width:280px;line-height:1.4}
+  .swatches{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}
+  .swatches button{margin:0;width:22px;height:22px;padding:0;border-radius:5px;border:1px solid #0004;cursor:pointer;box-shadow:0 0 0 1px #0006}
+  .swatches button.sel{outline:2px solid #00A2E8;outline-offset:1px}
+</style></head>
+<body>
+<h1>fourletters logo2 — mailbox tuner</h1>
+<div class="wrap">
+  <div class="controls">
+    <h2>Box</h2>
+    <label>Mailbox scale: <span class="val" id="scV">0.75</span>
+      <br><input type="range" id="sc" min="0.5" max="1.0" step="0.01" value="0.75"></label>
+    <label>Corner radius R: <span class="val" id="RV">9.0</span>
+      <br><input type="range" id="R" min="2" max="14" step="0.5" value="9"></label>
+    <label>Wall thickness t: <span class="val" id="tV">4.0</span>
+      <br><input type="range" id="t" min="1" max="6" step="0.5" value="4"></label>
+
+    <h2>Arch (opening)</h2>
+    <label>Arch width: <span class="val" id="awV">14.0</span>
+      <br><input type="range" id="aw" min="6" max="25" step="0.5" value="15"></label>
+    <label>Arch height: <span class="val" id="ahV">21.0</span>
+      <br><input type="range" id="ah" min="6" max="26" step="0.5" value="21"></label>
+
+    <h2>Colors</h2>
+    <label>Background:
+      <br><input type="color" id="bg" value="#2573C5"> <span id="bgV">#2573C5</span>
+      <div class="swatches" data-target="bg"></div></label>
+    <label>Mailbox:
+      <br><input type="color" id="fg" value="#FAF9FD"> <span id="fgV">#FAF9FD</span>
+      <div class="swatches" data-target="fg"></div></label>
+
+    <h2>Gap check</h2>
+    <label>Favicon size for px check: <span class="val" id="fpV">32</span>
+      <br><input type="range" id="fp" min="16" max="180" step="1" value="32"></label>
+    <table id="gaps"><thead><tr><th class="name">joint</th><th>units</th><th>px@size</th><th>status</th></tr></thead><tbody></tbody></table>
+    <div class="note">Parallel arch: the opening's top-left corner is concentric with the box corner (same center), so the wall stays a constant <b>t</b> thick. Corner radius = R − t.</div>
+  </div>
+
+  <div class="preview">
+    <div id="svgHost"></div>
+    <div class="sizes">
+      <figure><img class="px" id="p16" width="16" height="16"><figcaption>16</figcaption></figure>
+      <figure><img class="px" id="p32" width="32" height="32"><figcaption>32</figcaption></figure>
+      <figure><img class="px" id="p48" width="48" height="48"><figcaption>48</figcaption></figure>
+    </div>
+    <br>
+    <textarea id="out" readonly></textarea>
+    <br><button id="copy">Copy SVG</button>
+  </div>
+</div>
+
+<script>
+// ---- fixed layout (unscaled, 56x56 space) ----
+const CX = 28, CY = 28, CR = 28;      // background circle
+const boxLeft = 2, boxRight = 54;     // mailbox body horizontal extent
+const boxTop = 14, boxBottom = 44;    // mailbox body vertical extent
+// flag pole + flag (touch the box top and each other)
+const pole = {x:30, y:3, w:2, h:11};  // bottom at y=14 = boxTop
+const flag = "M32,3 H41.5 A1.5,1.5 0 0 1 43,4.5 V8.5 A1.5,1.5 0 0 1 41.5,10 H32 Z";
+const post = {x:25, y:44, w:6, h:12};  // centered on box (25+3=28=CX), top at boxBottom
+
+const $ = id => document.getElementById(id);
+const f2 = n => (+n).toFixed(2);
+
+function boxPath(R){
+  // rounded top corners only, square bottom
+  return `M${boxLeft},${boxBottom} V${boxTop+R} A${R},${R} 0 0 1 ${boxLeft+R},${boxTop} `+
+         `H${boxRight-R} A${R},${R} 0 0 1 ${boxRight},${boxTop+R} V${boxBottom} Z`;
+}
+
+function archPath(R, t, aw, ah){
+  // opening anchored to box's top-left, parallel (concentric) corner
+  const r   = R - t;                 // parallel corner radius
+  const L   = boxLeft + t;           // left wall x
+  const topY= boxTop + t;            // flat-top y
+  const ccX = boxLeft + R;           // left corner centre x (== box corner centre)
+  const rightX = L + aw;             // right wall x
+  const rcCx   = rightX - r;         // right corner centre x
+  const flatEnd= Math.max(ccX, rcCx);
+  const botY   = topY + ah;          // opening bottom y
+  return `M${f2(L)},${f2(botY)} V${f2(boxTop+R)} A${f2(r)},${f2(r)} 0 0 1 ${f2(ccX)},${f2(topY)} `+
+         `H${f2(flatEnd)} A${f2(r)},${f2(r)} 0 0 1 ${f2(rightX)},${f2(boxTop+R)} V${f2(botY)} Z`;
+}
+
+function buildSVG(p, forExport){
+  const body = `${boxPath(p.R)} ${archPath(p.R,p.t,p.aw,p.ah)}`;
+  const indent = forExport ? "\n\t\t" : "";
+  const svg =
+`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 56 56">
+	<circle cx="28" cy="28" r="28" fill="${p.bg}"/>
+	<g transform="translate(28,28) scale(${f2(p.sc)}) translate(-28,-28)" fill="${p.fg}">
+		<rect x="${pole.x}" y="${pole.y}" width="${pole.w}" height="${pole.h}"/>
+		<path d="${flag}"/>
+		<path fill-rule="evenodd" d="${body}"/>
+		<rect x="${post.x}" y="${post.y}" width="${post.w}" height="${post.h}"/>
+	</g>
+</svg>`;
+  return svg;
+}
+
+function gapRows(p){
+  const r = p.R - p.t;
+  const rows = [
+    ["pole → flag (x)",        flag.match(/M(\d+)/)[1] - (pole.x+pole.w), 0],
+    ["pole → box top (y)",     boxTop - (pole.y+pole.h), 0],
+    ["post → box bottom (y)",  post.y - boxBottom, 0],
+    ["arch wall → box (t)",    p.t, p.t],
+    ["arch corner radius",     r, r],
+    ["arch bottom → box (y)",  boxBottom - (boxTop+p.t+p.ah), null],
+  ];
+  return rows;
+}
+
+function render(){
+  const p = {
+    sc:+$('sc').value, R:+$('R').value, t:+$('t').value,
+    aw:+$('aw').value, ah:+$('ah').value,
+    bg:$('bg').value, fg:$('fg').value,
+  };
+  // guard: keep arch inside the body and geometry valid
+  const r = p.R - p.t;
+  if (p.aw < p.R + r) p.aw = p.R + r;                 // room for both corners + flat
+  if (boxTop + p.t + p.ah > boxBottom - 1) p.ah = boxBottom - 1 - boxTop - p.t;
+
+  // reflect display values
+  scV.textContent=f2(p.sc); RV.textContent=f2(p.R); tV.textContent=f2(p.t);
+  awV.textContent=f2(p.aw); ahV.textContent=f2(p.ah);
+  bgV.textContent=p.bg; fgV.textContent=p.fg; fpV.textContent=$('fp').value;
+  $('aw').value=p.aw; $('ah').value=p.ah;
+
+  const liveSVG = buildSVG(p,false);
+  $('svgHost').innerHTML = liveSVG.replace('viewBox="0 0 56 56"','viewBox="0 0 56 56" width="240" height="240"');
+  $('out').value = buildSVG(p,true);
+
+  // raster previews
+  const dataURL = 'data:image/svg+xml;utf8,'+encodeURIComponent(liveSVG);
+  ['p16','p32','p48'].forEach(id=>$(id).src=dataURL);
+
+  // gap table
+  const size = +$('fp').value, scaleFactor = size/56 * p.sc; // rendered px per unit inside group
+  const tb = $('gaps').querySelector('tbody'); tb.innerHTML='';
+  gapRows(p).forEach(([name,val,expect])=>{
+    const px = val*scaleFactor;
+    let cls='ok', status='ok';
+    if(expect!==null){
+      if(Math.abs(val-expect)>0.01){cls='bad';status='≠ '+f2(expect);}
+    }
+    if(name.startsWith('arch bottom')){ // just informative
+      cls = val<1 ? 'warn':'ok'; status = val<1?'tight':'ok';
+    }
+    if(px<1 && expect!==0){ cls='warn'; status=(status==='ok'?'':status+' / ')+'<1px'; }
+    tb.insertAdjacentHTML('beforeend',
+      `<tr><td class="name">${name}</td><td>${f2(val)}</td><td>${f2(px)}</td><td class="${cls}">${status}</td></tr>`);
+  });
+  markSwatches();
+}
+
+document.querySelectorAll('input').forEach(el=>el.addEventListener('input',render));
+$('copy').addEventListener('click',()=>{navigator.clipboard.writeText($('out').value);});
+
+// ---- preset color swatches ----
+const PALETTE = ['#33495B','#2A55C5','#167CD8','#00A2E8','#1F2A38','#0F172A',
+                 '#FFFFFF','#FAF9FD','#F5C542','#E8734A','#BE6E41','#38454F'];
+document.querySelectorAll('.swatches').forEach(box=>{
+  const target = box.dataset.target;
+  PALETTE.forEach(c=>{
+    const b=document.createElement('button');
+    b.type='button'; b.style.background=c; b.title=c;
+    b.addEventListener('click',()=>{ $(target).value=c; render(); });
+    box.appendChild(b);
+  });
+});
+function markSwatches(){
+  document.querySelectorAll('.swatches').forEach(box=>{
+    const cur = $(box.dataset.target).value.toUpperCase();
+    box.querySelectorAll('button').forEach(b=>
+      b.classList.toggle('sel', b.title.toUpperCase()===cur));
+  });
+}
+render();
+</script>
+</body>
+</html>
