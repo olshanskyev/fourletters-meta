@@ -20,7 +20,7 @@ flowchart TD
     Server["Server (REST API + Inbox)"]
     DB[(PostgreSQL)]
     MQ[[RabbitMQ<br/>live fan-out]]
-    PushService[FCM / APNs]
+    PushService[Web Push<br/>VAPID]
     OAuth[VK / Google OAuth API]
 
     Client -->|HTTPS Auth/Keys| Server
@@ -119,7 +119,7 @@ The delivery model separates the **send path** (trusted, durable) from the **rec
 **Send path (always through the Server):**
 1. Alice encrypts the message through her **Double Ratchet** session with Bob (opening one from his pre-key bundle on first contact). The ratchet authenticates the message, so chat messages carry no separate signature.
 2. Alice's PWA `POST`s it to the **Server** and keeps a copy in its local **outbox**.
-3. The Server holds the message in its **hot tier** (in-memory pending map; see [3](#3-storage-strategy)) and **publishes** it to RabbitMQ with routing key `user.bob`. The Server returns an **`accepted`** response — Alice's send call is now complete (fire-and-forget; no client retry loop).
+3. The Server holds the message in its **hot tier** (in-memory pending map; see [3](#3-storage-strategy)) and **publishes** it to RabbitMQ with routing key `user.bob`, marked **`mandatory`** so the broker returns it immediately if Bob has no live Hub binding. The Server returns an **`accepted`** response — Alice's send call is now complete (fire-and-forget; no client retry loop).
 
 **Receive path (best-effort live, via whatever Hub Bob is on):**
 1. RabbitMQ fans the payload out to whichever Hub currently holds Bob's binding; the Hub pushes it over the WebSocket.
@@ -137,23 +137,30 @@ sequenceDiagram
     participant Hub as Hub (Bob's relay)
     participant Bob as Bob PWA
     participant DB as PostgreSQL (durable inbox)
-    participant Push as FCM / APNs
+    participant Push as Web Push (VAPID)
 
     Alice->>Alice: Encrypt (Bob pubkey) + sign (Alice key)
     Alice->>Server: POST /api/messages (store in local outbox)
     Server->>Hot: Hold copy
     Server-->>Alice: accepted (send complete)
-    Server->>MQ: Publish routing key user.bob
-    Server->>Push: Trigger push (independent tripwire)
+    Server->>MQ: Publish routing key user.bob (mandatory)
 
-    alt Bob online & Hub honest
+    Note over Server,Bob: Immediate routing outcome (at publish time)
+    alt Bob online (routable binding)
         MQ-->>Hub: Live fan-out
         Hub-->>Bob: Deliver ciphertext (WS)
+    else Bob offline (no binding)
+        MQ-->>Server: Return unroutable (immediate)
+        Server->>Push: Notify Bob now (sender identity only, debounced)
+    end
+
+    Note over Server,DB: Hold-window resolution (later)
+    alt Signed receipt within hold window
         Bob->>Bob: Decrypt
         Bob->>Server: Signed delivery receipt (delivered)
         Server->>Hot: Drop retained copy (0 DB writes)
         Server-->>Alice: Relay signed receipt -> clear outbox
-    else No signed receipt within hold window (offline OR malicious drop)
+    else No signed receipt (offline OR malicious drop)
         Server->>DB: Single write to durable inbox (ciphertext)
         Server->>Hot: Evict from memory
         Note over Bob,Server: Delivered later via re-publish or GET /inbox sync
@@ -164,7 +171,7 @@ sequenceDiagram
 
 The delivery guarantee does **not** rest on RabbitMQ (a relay may consume a message without ever forwarding it, and a recipient may simply be offline). Instead it rests on the **Server's retained copy plus an end-to-end signed receipt**:
 
-*   The Server **publishes `user.bob` once** as a best-effort live attempt and keeps the copy (hot tier, then DB). If a **signed** `delivered` receipt arrives, the Server drops the copy. If none arrives within the hold window, it does **not** re-publish — the copy simply flushes to the DB and waits.
+*   The Server **publishes `user.bob` once** as a best-effort live attempt and keeps the copy (hot tier, then DB). The publish is **`mandatory`**, so if Bob has no live binding the broker returns the envelope and the Server fires a **Web Push** notification (sender identity only, never ciphertext) to wake Bob's app — see [messages-lifecycle.md § Push notifications](algorithms/messages-lifecycle.md#push-notifications). If a **signed** `delivered` receipt arrives, the Server drops the copy. If none arrives within the hold window, it does **not** re-publish — the copy simply flushes to the DB and waits.
 *   During the in-memory hold window the **sender's outbox is the durable backup**, so the hot tier is allowed to be non-durable.
 *   **Backstop (the redelivery mechanism):** whenever Bob's app (re)connects it calls `GET /api/inbox` directly on the Server to pull anything it missed live. This HTTP sync path is independent of any Hub and returns the union of the hot and cold tiers, so a message is always eventually delivered even if the live attempt was missed.
 *   **Undecryptable backstop (negative ack):** if Bob receives the copy but **cannot decrypt** it — it was sealed to a stale identity / pre-key after he logged in on a new device — he returns a signed **`undecryptable`** receipt. The Server **drops the retained copy** (no one can decrypt it, so retrying delivery is pointless) and relays the NACK to Alice, who re-fetches Bob's current bundle and **resends once** under a fresh session. This prevents an undecryptable message from looping forever in the inbox (it is never acknowledged by a normal `delivered`). See [MESSAGE_SECURITY.md §2.1](MESSAGE_SECURITY.md#21-key-lifecycle-logout--single-active-device-policy).

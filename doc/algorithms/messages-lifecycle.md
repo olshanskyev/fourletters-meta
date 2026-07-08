@@ -44,6 +44,7 @@ flowchart TD
     Cold[("Cold tier — PostgreSQL inbox")]
     PR[("Pending receipts — heap")]
     MQ[["RabbitMQ live fan-out"]]
+    Push[["Web Push (VAPID)"]]
 
     P1 --> Acc
     P2 --> Acc
@@ -51,7 +52,7 @@ flowchart TD
     R1 --> Rec
 
     Acc -->|store copy| Hot
-    Acc -->|publish user.recipient| MQ
+    Acc -->|"publish user.recipient (mandatory)"| MQ
 
     Flush -->|"claim + persist (1 write)"| Cold
     Flush -->|then evict| Hot
@@ -59,7 +60,8 @@ flowchart TD
     Rec -->|"drop copy (hot or cold)"| Hot
     Rec -->|"delete row if flushed"| Cold
     Rec -->|"relay live (mandatory)"| MQ
-    MQ -.->|"only for receipts: unroutable: sender offline → retain"| PR
+    MQ -.->|"receipt unroutable: sender offline → retain"| PR
+    MQ -.->|"message unroutable: recipient offline → notify"| Push
 
     Inb -->|"union read (as recipient)"| Hot
     Inb -->|"union read (as recipient)"| Cold
@@ -84,7 +86,7 @@ stateDiagram-v2
 ```
 
 - **Confirmed fast (both online):** `HotTier → Dropped`, **zero** DB writes.
-- **Recipient offline:** `HotTier → ColdTier` (one write), delivered later via `GET /inbox`, then `ColdTier → Dropped` on the signed receipt.
+- **Recipient offline:** `HotTier → ColdTier` (one write), delivered later via `GET /inbox`, then `ColdTier → Dropped` on the signed receipt. The message is published **`mandatory`**, so the broker returns it as unroutable the instant the recipient has no live binding — that return fires a **Web Push** notification (see [Push notifications](#push-notifications)) while the copy is still in the hot tier, preserving the zero-write fast path.
 - A message in transit during flush is briefly in **both** tiers (harmless duplicate, de-duped by `messageId`) and **never in neither** (persist-then-evict).
 
 ## Receipt path (delivered / read / undecryptable)
@@ -96,7 +98,7 @@ The Server authenticates the **submitter** of `POST /receipts` via JWT (transpor
 ```mermaid
 flowchart TD
     Start([Recipient sends receipt]) --> Drop["recordReceipt: drop retained message copy (first receipt only)"]
-    Drop --> Live["relay receiopt live, mandatory"]
+    Drop --> Live["relay receipt live, mandatory"]
     Live --> Online{Sender online?<br/> routable binding}
     Online -- "Yes (routed)" --> Got["Sender gets it instantly → ✓✓ / read<br/> (nothing stored)"]
     Online -- "No (returned unroutable)" --> Store["Server retains it in PendingReceipts (heap)"]
@@ -107,7 +109,7 @@ flowchart TD
 - **Online senders cost nothing extra:** routable receipts are never stored, so a busy conversation does not accumulate thousands of acks to re-send.
 - **Non-durable on purpose:** a Server restart clears `PendingReceipts`; the sender then detects the restart (`serverStartedAt` changed) and resyncs, which re-drives the receipt.
 - `read` supersedes `delivered` for the same message, so only the latest status per message is retained.
-- Requires `spring.rabbitmq.publisher-returns: true`; only **receipts** are published mandatory (messages stay best-effort, unchanged).
+- Requires `spring.rabbitmq.publisher-returns: true`; both **messages** and **receipts** are published `mandatory`. An unroutable **receipt** is retained in `PendingReceipts`; an unroutable **message** triggers a Web Push notification (see [Push notifications](#push-notifications)).
 
 ### `undecryptable` — the negative ack
 
@@ -120,4 +122,27 @@ An `undecryptable` receipt travels the **same `recordReceipt` path** — drop th
 
 - **Loop-safe:** the sender resends **once per `messageId`**. If the resend is *also* returned `undecryptable`, the payload is treated as undeliverable — the sender stops and surfaces it locally (it is not a key-rotation problem). Without this NACK an undecryptable message would otherwise sit in the cold tier and be re-pulled on every `GET /inbox` forever, since it can never earn a `delivered`.
 - **Server-blind:** the Server never learns *why* — `undecryptable` is just another opaque receipt type it drops-and-relays. No new endpoint, no inbox bookkeeping.
+
+## Push notifications
+
+Because messages are published **`mandatory`**, the broker returns any envelope it cannot route to a live consumer. For a **message**, an unroutable return means the recipient has **no Hub binding** — i.e. the app is not currently connected — which is exactly when a background **Web Push** notification is fired.
+
+```mermaid
+flowchart TD
+    Acc([accept: store copy + publish message, mandatory]) --> Route{Recipient bound?<br/>live Hub consumer}
+    Route -- "Yes (routed)" --> Live["delivered live via Hub → receipt clears copy"]
+    Route -- "No (returned unroutable)" --> Notify["ReturnsCallback → PushNotificationService.notifyRecipient"]
+    Notify --> Debounce{Passes per-recipient<br/>debounce window?}
+    Debounce -- No --> Skip["skip (recent push already sent)"]
+    Debounce -- Yes --> Lookup["load push_subscriptions row + sender/group metadata"]
+    Lookup --> Send["send VAPID push: title = sender/group name, body = generic"]
+    Send --> Stale{404 / 410?}
+    Stale -- Yes --> Del["delete stale subscription row"]
+```
+
+- **Trigger, not content:** the push payload carries only `senderId` / `groupId` (identity the Server already knows) plus a generic body — **never** E2E message content. The client resolves the local conversation on click and navigates to it.
+- **Fast path preserved:** the notification fires from the `ReturnsCallback` while the copy is still in the **hot tier**, so a normal offline delivery still costs a single DB write at flush time and nothing extra here.
+- **Only on the unroutable return:** push is fired **exclusively** when the mandatory publish comes back unroutable (recipient has no live binding). There is deliberately **no** flush-time backstop: the rare case where a message routes to a Hub binding that *looks* alive but never delivers is left to the ordinary `GET /inbox` sync — a missed wake-up is a minor UX cost, not a correctness problem.
+- **Debounced per recipient:** rapid bursts to the same offline recipient collapse into one notification within a short window (`push.debounce-seconds`), so a chatty sender does not fan out a storm of notifications.
+- **Single device:** one subscription per user (`push_subscriptions` keyed by `user_id`, upserted on `POST /push/subscribe`). A stale endpoint returning `404`/`410` is pruned on send; a new login on another device replaces the row.
 

@@ -24,14 +24,14 @@ That is the **entire** Phase 1 topology: one exchange, one ephemeral queue per H
 
 ### Direction of traffic (Phase 1)
 
-- **Server → RabbitMQ:** publish-only. The Server publishes accepted payloads to `messages.exchange` with routing key `user.{recipientId}`. The Server never consumes from RabbitMQ in Phase 1.
+- **Server → RabbitMQ:** publish-only. The Server publishes accepted payloads to `messages.exchange` with routing key `user.{recipientId}`, marked **`mandatory`** so the broker returns any envelope it cannot route to a live binding. The Server never consumes from RabbitMQ in Phase 1.
 - **RabbitMQ → Hub:** consume-only. A Hub only consumes from its own `hub.queue.{hubId}`. A Hub **never publishes** to `messages.exchange` (clients never send through a Hub — sending always goes PWA → Server).
 - **Signed delivery receipts do not transit RabbitMQ.** They travel from the recipient's client **directly to the Server over HTTPS**, out of band from the live bus. RabbitMQ carries forward delivery only.
 
 ## Routing Behaviour
 
 - **Recipient online (binding exists):** `messages.exchange` routes `user.bob` to the bound `hub.queue.{hubId}`; the Hub consumes it and pushes it over Bob's WebSocket.
-- **Recipient offline (no binding):** the message is **unroutable** and is simply **discarded by the broker**. This is safe and intentional — the Server still holds the copy (hot tier), and after the hold window it performs a single write to the PostgreSQL inbox. Bob receives it later via the Server's `GET /api/inbox` sync. The Server does **not** rely on broker routability feedback (no `mandatory`/return handling is required for correctness).
+- **Recipient offline (no binding):** the message is **unroutable**, so — because it is published **`mandatory`** — the broker **returns** it to the Server instead of silently discarding it. Correctness still does **not** depend on this feedback: the Server already holds the copy (hot tier) and, after the hold window, performs a single write to the PostgreSQL inbox, and Bob receives it later via `GET /api/inbox`. The return is used only as an **offline tripwire**: the Server's `ReturnsCallback` fires a **Web Push** notification to wake Bob's app (sender identity only, never ciphertext; debounced per recipient). See [messages-lifecycle.md § Push notifications](messages-lifecycle.md#push-notifications).
 - **No live ack — no re-publish.** A published message is a *best-effort live* attempt only. If no signed `delivered` receipt arrives within the hold window, the Server does **not** re-publish; it simply lets the copy flush from the hot tier to the DB. The message is then delivered when Bob's client next **pulls** via `GET /api/inbox` (the `/inbox` read returns the union of the hot and cold tiers, so it covers messages still in memory as well as those already written to the DB).
 
 ## Permissions (Phase 1 baseline)
@@ -63,7 +63,7 @@ flowchart TD
         subgraph HubQueues [Ephemeral Hub queues]
             HubBQueue[hub.queue.B_UUID<br/>Bound to: user.bob]
         end
-        Discard[Unroutable message<br/>discarded by broker]
+        Discard[Unroutable message<br/>returned to Server]
     end
 
     subgraph Hub [Hub - Bob's relay]
@@ -74,6 +74,7 @@ flowchart TD
     Bob([Bob PWA])
     Receipt[Signed delivery receipt<br/>direct to Server over HTTPS]
     ServerDrop[Server drops retained copy]
+    ReturnCb[ReturnsCallback:<br/>fire Web Push notify]
     HoldExpire[Hold window elapses<br/>no signed receipt]
     DB[(PostgreSQL inbox<br/>single write)]
     Sync[Later: Bob GET /api/inbox]
@@ -86,6 +87,8 @@ flowchart TD
 
     %% Offline path
     MainExchange -- No, offline --> Discard
+    Discard -. mandatory return .-> ReturnCb
+    ReturnCb -. wake app .-> Bob
     Discard -. Server-side, not in broker .-> HoldExpire
     HoldExpire --> DB
     DB --> Sync --> Bob

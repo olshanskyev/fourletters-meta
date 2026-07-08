@@ -596,6 +596,40 @@
             "description": "Name of the topic exchange the Hub binds user routing keys against (messages.exchange)."
           }
         }
+      },
+      "PushSubscriptionKeys": {
+        "type": "object",
+        "required": ["p256dh", "auth"],
+        "description": "The client keys of a Web Push (VAPID) subscription, used by the Server to encrypt push payloads end-to-end to the browser push service.",
+        "properties": {
+          "p256dh": {
+            "type": "string",
+            "description": "The subscription's P-256 ECDH public key (Base64url), as produced by the browser PushManager."
+          },
+          "auth": {
+            "type": "string",
+            "description": "The subscription's auth secret (Base64url), as produced by the browser PushManager."
+          }
+        }
+      },
+      "PushSubscription": {
+        "type": "object",
+        "required": ["endpoint", "keys"],
+        "description": "A browser Web Push (VAPID) subscription registered by an authenticated client so the Server can wake an offline recipient.",
+        "properties": {
+          "endpoint": {
+            "type": "string",
+            "description": "The push service endpoint URL the Server delivers encrypted pushes to."
+          },
+          "expirationTime": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Optional epoch milliseconds at which the subscription expires, if the browser provided one."
+          },
+          "keys": {
+            "$ref": "#/components/schemas/PushSubscriptionKeys"
+          }
+        }
       }
     }
   }
