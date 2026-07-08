@@ -1,6 +1,15 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 56 56">
-	<circle cx="28" cy="28" r="28" fill="#2573c5"/>
-	<g transform="translate(28,28) scale(0.75) translate(-28,-28)" fill="#faf9fd">
+	<defs>
+		<linearGradient id="bgGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+			<stop offset="0%" stop-color="#7986cb"/>
+			<stop offset="100%" stop-color="#5c6bc0"/>
+		</linearGradient>
+		<filter id="boxShadow" x="-30%" y="-30%" width="160%" height="160%">
+			<feDropShadow dx="0.00" dy="1.20" stdDeviation="1.20" flood-color="#000000" flood-opacity="0.35"/>
+		</filter>
+	</defs>
+	<circle cx="28" cy="28" r="28" fill="url(#bgGrad)"/>
+	<g transform="translate(28,28) scale(0.75) translate(-28,-28)" fill="#faf9fd" filter="url(#boxShadow)">
 		<rect x="30" y="3" width="2" height="11"/>
 		<path d="M32,3 H41.5 A1.5,1.5 0 0 1 43,4.5 V8.5 A1.5,1.5 0 0 1 41.5,10 H32 Z"/>
 		<path fill-rule="evenodd" d="M2,44 V23 A9,9 0 0 1 11,14 H45 A9,9 0 0 1 54,23 V44 Z M6.00,39.00 V23.00 A5.00,5.00 0 0 1 11.00,18.00 H16.00 A5.00,5.00 0 0 1 21.00,23.00 V39.00 Z"/>

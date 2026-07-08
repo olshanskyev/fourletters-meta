@@ -47,12 +47,28 @@
       <br><input type="range" id="ah" min="6" max="26" step="0.5" value="21"></label>
 
     <h2>Colors</h2>
-    <label>Background:
-      <br><input type="color" id="bg" value="#2573C5"> <span id="bgV">#2573C5</span>
-      <div class="swatches" data-target="bg"></div></label>
+    <label>Background gradient — top:
+      <br><input type="color" id="bg1" value="#7986cb"> <span id="bg1V">#7986cb</span>
+      <div class="swatches" data-target="bg1"></div></label>
+    <label>Background gradient — bottom:
+      <br><input type="color" id="bg2" value="#5c6bc0"> <span id="bg2V">#5c6bc0</span>
+      <div class="swatches" data-target="bg2"></div></label>
     <label>Mailbox:
-      <br><input type="color" id="fg" value="#FAF9FD"> <span id="fgV">#FAF9FD</span>
+      <br><input type="color" id="fg" value="#faf9fd"> <span id="fgV">#faf9fd</span>
       <div class="swatches" data-target="fg"></div></label>
+
+    <h2>Shadow</h2>
+    <label><input type="checkbox" id="shOn" checked> enabled</label>
+    <label>Offset X (dx): <span class="val" id="sdxV">0.0</span>
+      <br><input type="range" id="sdx" min="-4" max="4" step="0.1" value="0"></label>
+    <label>Offset Y (dy): <span class="val" id="sdyV">1.2</span>
+      <br><input type="range" id="sdy" min="-4" max="4" step="0.1" value="1.2"></label>
+    <label>Blur (stdDeviation): <span class="val" id="sblV">1.2</span>
+      <br><input type="range" id="sbl" min="0" max="5" step="0.1" value="1.2"></label>
+    <label>Opacity: <span class="val" id="sopV">0.35</span>
+      <br><input type="range" id="sop" min="0" max="1" step="0.01" value="0.35"></label>
+    <label>Color:
+      <br><input type="color" id="shc" value="#000000"> <span id="shcV">#000000</span></label>
 
     <h2>Gap check</h2>
     <label>Favicon size for px check: <span class="val" id="fpV">32</span>
@@ -109,11 +125,21 @@ function archPath(R, t, aw, ah){
 
 function buildSVG(p, forExport){
   const body = `${boxPath(p.R)} ${archPath(p.R,p.t,p.aw,p.ah)}`;
-  const indent = forExport ? "\n\t\t" : "";
+  const grad =
+`		<linearGradient id="bgGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+			<stop offset="0%" stop-color="${p.bg1}"/>
+			<stop offset="100%" stop-color="${p.bg2}"/>
+		</linearGradient>`;
+  const shadow = p.shOn ?
+`		<filter id="boxShadow" x="-30%" y="-30%" width="160%" height="160%">
+			<feDropShadow dx="${f2(p.sdx)}" dy="${f2(p.sdy)}" stdDeviation="${f2(p.sbl)}" flood-color="${p.shc}" flood-opacity="${f2(p.sop)}"/>
+		</filter>` : '';
+  const defs = `\t<defs>\n${grad}${shadow?'\n'+shadow:''}\n\t</defs>\n`;
+  const gFilter = p.shOn ? ' filter="url(#boxShadow)"' : '';
   const svg =
 `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 56 56">
-	<circle cx="28" cy="28" r="28" fill="${p.bg}"/>
-	<g transform="translate(28,28) scale(${f2(p.sc)}) translate(-28,-28)" fill="${p.fg}">
+${defs}	<circle cx="28" cy="28" r="28" fill="url(#bgGrad)"/>
+	<g transform="translate(28,28) scale(${f2(p.sc)}) translate(-28,-28)" fill="${p.fg}"${gFilter}>
 		<rect x="${pole.x}" y="${pole.y}" width="${pole.w}" height="${pole.h}"/>
 		<path d="${flag}"/>
 		<path fill-rule="evenodd" d="${body}"/>
@@ -140,7 +166,9 @@ function render(){
   const p = {
     sc:+$('sc').value, R:+$('R').value, t:+$('t').value,
     aw:+$('aw').value, ah:+$('ah').value,
-    bg:$('bg').value, fg:$('fg').value,
+    bg1:$('bg1').value, bg2:$('bg2').value, fg:$('fg').value,
+    shOn:$('shOn').checked, sdx:+$('sdx').value, sdy:+$('sdy').value,
+    sbl:+$('sbl').value, sop:+$('sop').value, shc:$('shc').value,
   };
   // guard: keep arch inside the body and geometry valid
   const r = p.R - p.t;
@@ -150,7 +178,10 @@ function render(){
   // reflect display values
   scV.textContent=f2(p.sc); RV.textContent=f2(p.R); tV.textContent=f2(p.t);
   awV.textContent=f2(p.aw); ahV.textContent=f2(p.ah);
-  bgV.textContent=p.bg; fgV.textContent=p.fg; fpV.textContent=$('fp').value;
+  bg1V.textContent=p.bg1; bg2V.textContent=p.bg2; fgV.textContent=p.fg;
+  sdxV.textContent=f2(p.sdx); sdyV.textContent=f2(p.sdy);
+  sblV.textContent=f2(p.sbl); sopV.textContent=f2(p.sop); shcV.textContent=p.shc;
+  fpV.textContent=$('fp').value;
   $('aw').value=p.aw; $('ah').value=p.ah;
 
   const liveSVG = buildSVG(p,false);
