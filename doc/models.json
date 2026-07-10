@@ -342,12 +342,16 @@
       "PreKeyCountResponse": {
         "type": "object",
         "required": ["count"],
-        "description": "How many one-time pre-keys the caller still has in the directory, so the client can top up below a threshold.",
+        "description": "How many one-time pre-keys the caller still has in the directory, so the client can top up below a threshold. Also carries the caller's currently published identity key so a re-used device can detect a stale directory entry and re-publish.",
         "properties": {
           "count": {
             "type": "integer",
             "format": "int32",
             "description": "Remaining one-time pre-keys in the caller's pool."
+          },
+          "identityKey": {
+            "type": "string",
+            "description": "The caller's Curve25519 identity public key currently stored in the directory (Base64), or absent if the caller has no directory entry."
           }
         }
       },

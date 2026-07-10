@@ -451,7 +451,7 @@
       "get": {
         "tags": ["Keys"],
         "summary": "Count caller's remaining one-time pre-keys",
-        "description": "Returns how many one-time pre-keys the caller still has in the directory, so the client can top up below a threshold.",
+        "description": "Returns how many one-time pre-keys the caller still has in the directory (so the client can top up below a threshold) and the caller's currently published identity key (so a re-used device can detect a stale directory entry and re-publish).",
         "operationId": "countPreKeys",
         "security": [{ "BearerAuth": [] }],
         "responses": {
