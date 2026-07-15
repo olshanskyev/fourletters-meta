@@ -1,10 +1,10 @@
--- Group conversations: roster only. Messages are sent as one independent 1:1 copy per member,
--- so the Server never holds any group key material.
+-- Group conversations: roster only
 
 CREATE TABLE __DATABASE_SCHEMA__.groups (
     id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     name        VARCHAR(255) NOT NULL,
     owner_id    UUID NOT NULL,
+    epoch       INTEGER NOT NULL DEFAULT 0,
     created_at  TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at  TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
 );

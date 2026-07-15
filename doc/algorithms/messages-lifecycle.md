@@ -9,14 +9,16 @@ For the high-level model see [2.4 Message Sending & Receiving](../ARCHITECTURE.m
 | Store | Where | Durable | Holds |
 | --- | --- | --- | --- |
 | **Hot tier** (`HotTierStorage`) | JVM heap | No (sender's outbox backs it) | Accepted messages during the post-accept hold window |
-| **Cold tier** (`inbox` table) | PostgreSQL | Yes | Messages not confirmed within the hold window |
+| **Cold tier** (`inbox` + `inbox_pending`) | PostgreSQL | Yes | Messages not confirmed within the hold window — single-copy for both 1:1 and group |
 | **Pending receipts** (`PendingReceipts`) | JVM heap | No (resync re-drives) | Delivery/read acks owed to an offline sender |
+
+> **Single-copy storage.** A 1:1 message and a **group** message use the **same** single-copy storage. `accept` keeps one payload plus the set of recipients still owed delivery (hot tier `HotTierStorage.Entry`, cold tier one `inbox` row keyed by `message_id` + one `inbox_pending` row per pending recipient) and publishes a copy to each recipient — a group message (`groupId` set, no `recipientId`) fans out to every `user.<memberId>`, a 1:1 message (no `groupId`) to its single recipient. Each receipt clears **only that recipient** from the pending set; the shared `inbox` payload is dropped by a database trigger once its last `inbox_pending` row is gone. An `undecryptable` NACK drops that member's pending entry and relays the NACK so the sender re-delivers that one message over the pairwise ratchet (a 1:1 message carrying the `groupId`) and redistributes its Sender Key for future messages.
 
 ## Endpoints → InboxService
 
 | Endpoint | Service call | Effect |
 | --- | --- | --- |
-| `POST /messages` | `accept` | Stamp sender, **store in hot tier**, publish live, return `accepted` + `serverStartedAt` |
+| `POST /messages` | `accept` | Stamp sender; store **once** in the hot tier with the set of recipients still owed delivery, then publish live to each (a 1:1 to its recipient, a group fanned out to every member); return `accepted` + `serverStartedAt` |
 | `POST /messages/batch` | `acceptAll` | Same as `accept` per item (idempotent by `messageId`); used by client resync |
 | `GET /inbox` | `getInbox` | Return **hot ∪ cold** messages (as recipient) **+ drained pending receipts** (as sender) |
 | `POST /receipts` | `recordReceipt` | Drop the retained copy, **record the ack**, and relay it live to the sender |

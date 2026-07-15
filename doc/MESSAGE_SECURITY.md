@@ -2,7 +2,7 @@
 
 This document describes the **end-to-end (E2E) cryptography** and the **client-side at-rest storage** model: what keys the PWA creates, how the Server acts as a key directory, how messages are protected with the **Signal protocol**, and how the client stores and loads messages from IndexedDB without leaking plaintext at rest.
 
-fourletters does not invent its own message crypto. 1:1 messaging uses the **Signal protocol** — **X3DH** for the initial key agreement and the **Double Ratchet** for ongoing messages — via the community [`@privacyresearch/libsignal-protocol-typescript`](https://github.com/privacyresearch/libsignal-protocol-typescript) library (Curve25519 · AES-CBC · HMAC-SHA256). Because Signal is a published, widely-audited standard, this document leans on its guarantees (confidentiality, authenticity, forward secrecy, post-compromise security) rather than re-deriving them, and focuses on the parts specific to fourletters: key generation, the directory, key-change detection, group fan-out, and at-rest storage.
+fourletters does not invent its own message crypto. 1:1 messaging uses the **Signal protocol** — **X3DH** for the initial key agreement and the **Double Ratchet** for ongoing messages — via the community [`@privacyresearch/libsignal-protocol-typescript`](https://github.com/privacyresearch/libsignal-protocol-typescript) library (Curve25519 · AES-CBC · HMAC-SHA256). Because Signal is a published, widely-audited standard, this document leans on its guarantees (confidentiality, authenticity, forward secrecy, post-compromise security) rather than re-deriving them, and focuses on the parts specific to fourletters: key generation, the directory, key-change detection, group Sender Keys, and at-rest storage.
 
 It complements the server-side flow in [ARCHITECTURE.md §2.3–§2.6](ARCHITECTURE.md#23-e2e-encryption--key-exchange) and the message lifecycle in [algorithms/messages-lifecycle.md](algorithms/messages-lifecycle.md). The Server and Hub **never see plaintext** — payloads are encrypted on the sender's device and decrypted only on the recipient's.
 
@@ -109,7 +109,7 @@ When the revoked Device A logs in again, it finds **no Signal identity**, regene
 3. It publishes the new bundle with `PUT /keys`, **overwriting** the directory entry.
 4. New sessions now target the new identity; the new device has **no history** and cannot read anything sealed to the old identity (accepted trade-off — see below).
 5. **On every contact's device,** the next interaction reconciles the changed identity and shows *"X's security code changed"* ([§3.1](#31-key-change-detection-security-code-changed)) — auto-accepted, non-blocking.
-6. **Groups:** nothing special. A group message is sent as one independent 1:1 copy per member through that member's *current* session ([ARCHITECTURE.md §2.7](ARCHITECTURE.md#27-group-messaging-client-side-11-fan-out)), so the new device simply receives subsequent group messages under its new identity like any 1:1. As with 1:1, history that lived only on the old device is not carried over.
+6. **Groups:** a new device holds no peer Sender Keys, so early group messages may fail to decrypt; each triggers an `undecryptable` NACK and the sender redistributes its current Sender Key, after which subsequent group messages decrypt ([§6.5](#65-membership-epoch--new-devices)). As with 1:1, history that lived only on the old device is not carried over.
 
 > **In-flight messages self-heal via a negative ack.** A message already accepted by the Server but sealed to the *old* identity cannot be opened by the new device — the Double Ratchet has no matching session/pre-key, so the decrypt fails. The new device returns a signed **`undecryptable`** receipt, which makes the Server **drop the retained copy** and relay a NACK to the sender; the sender re-fetches the new bundle (re-pinning it, [§3.1](#31-key-change-detection-security-code-changed)) and **resends once** under a fresh session. So such a message is *recovered*, not lost — see [ARCHITECTURE.md §2.5](ARCHITECTURE.md#25-delivery-guarantee-server-retained-copy--signed-receipt) and [messages-lifecycle.md](algorithms/messages-lifecycle.md#undecryptable--the-negative-ack). What is genuinely **lost** is only history that lived solely on the old device (never re-sent) — spanning one identity across devices is deferred to [FUTURE_EXTENSIONS.md §9](FUTURE_EXTENSIONS.md#9-multi-device-key-handling).
 
@@ -154,7 +154,7 @@ Detection is **event-driven — no polling**. The pin is re-checked only on mome
 - **The Double Ratchet reports a changed remote identity** — the primary detector. When the library establishes or continues a session and the peer's identity key differs from the one on record, fourletters re-fetches the bundle, re-pins, and raises the banner. A changed identity after a peer's device switch surfaces here.
 - **A receipt signature fails against the pinned identity.** Receipts travel *outside* the ratchet ([§4](#4-session-establishment--messaging)), so they carry an explicit identity-key signature. A verification failure triggers a single re-fetch: if the *fresh* identity verifies it is a legitimate rotation (re-pin + banner), otherwise it is a genuinely bad signature (drop, do **not** re-pin).
 
-Groups reuse the identical path per member, so a member's device switch surfaces as *"Y's security code changed"* in the group and re-pins that member's identity for subsequent per-member sends.
+Groups reuse the identical path per member for the pairwise SKDM channel, so a member's device switch surfaces as *"Y's security code changed"* and re-pins that member's identity for subsequent Sender-Key distribution.
 
 > **Level 1 (notice), by design.** The banner is informational and never blocks sending — a new-device login *legitimately* changes the code (see [§2.1](#21-key-lifecycle-logout--single-active-device-policy)). It converts a *silent* server identity-swap into a *visible* one. True defeat of a malicious Server needs an **out-of-band** safety-number comparison (Level 2), which single-active-device cannot automate; it is offered only as an optional manual verification.
 
@@ -229,26 +229,41 @@ flowchart TD
 
 ---
 
-## 6. Group Encryption (Client-Side 1:1 Fan-Out)
+## 6. Group Encryption (Sender Keys)
 
-A group message is **not** a distinct cryptographic primitive: it is sent as **N independent 1:1 messages**, one per other member, each going through that member's own **Double Ratchet session** exactly like a direct message ([§4](#4-session-establishment--messaging)). There is **no group key, no epoch, and no rotation**. The server-side flow is in [ARCHITECTURE.md §2.7](ARCHITECTURE.md#27-group-messaging-client-side-11-fan-out); this section is the client crypto.
+A group message is encrypted **once** with the sender's per-group **Sender Key** and stored a single time by the Server, which fans the one copy out to every member (WhatsApp-style). The Signal library has no group cipher, so the Sender-Key cipher is built from WebCrypto primitives plus the library's Curve25519 for signatures. The server-side storage/fan-out flow is in [ARCHITECTURE.md §2.7](ARCHITECTURE.md#27-group-messaging-sender-keys); this section is the client crypto.
 
-### 6.1 Sending
+### 6.1 The Sender Key
 
-1. Read the group **roster** (`GET /groups/{id}`) to get the member list; drop the sender.
-2. For **each** remaining member, use (or open) that member's ratchet session and **ratchet-encrypt** the plaintext into a per-member `payload` exactly as in [§4](#4-session-establishment--messaging).
-3. `POST /messages` once per member with the **same** `messageId`, that member's `recipientId`, the `groupId`, and the per-member `payload`.
+Each member owns, per `(groupId, epoch)`, a **Sender Key**:
 
-Each copy is an ordinary 1:1 message to the Server; the shared `messageId` lets the sender track the group send as one local message, and `groupId` lets each recipient thread it.
+- a 32-byte symmetric **chain key** that ratchets forward one message key per message — `msgKey = HMAC-SHA256(chainKey, 0x01)`, `nextChainKey = HMAC-SHA256(chainKey, 0x02)` — giving forward secrecy for that member's own stream, and
+- a per-group **Curve25519 signature key pair**, so every group message is authenticated to its sender.
 
-### 6.2 Receiving
+Message payloads are AES-256-GCM (random 12-byte IV) over the plaintext, and the ciphertext is signed with the sender's signature key. Keys are namespaced by `(groupId, epoch)`; the **epoch** is server-authoritative (below).
 
-Identical to a 1:1 message: **ratchet-decrypt** the payload with the recipient's session (which authenticates it), then re-encrypt with the local DB master key and persist as an ordinary `messages` record ([§5](#5-loading-messages-in-the-gui)). The `groupId` selects the group conversation to thread it into.
+### 6.2 Distribution (lazy, at send time)
 
-### 6.3 Membership & new devices
+A member shares its Sender Key with a peer via a **Sender Key Distribution Message (SKDM)** — `{groupId, epoch, chainKey, iteration, sigPubKey}` — carried over the pairwise **Double Ratchet** ([§4](#4-session-establishment--messaging)) as a small control message (never seen by the Server in the clear). Distribution is lazy: at send time the sender computes `roster − alreadyDistributed` and sends an SKDM 1:1 to each member that does not yet hold its current-epoch Sender Key, then records them as distributed.
 
-- **Roster** is owned by the Server (`groups` + `group_members`); the owner adds/removes members (`PATCH /members`), any member may leave (`DELETE /members/me`). Removing a member simply stops future fan-out to them.
-- **New device:** no special handling. Because every copy goes through each member's *current* session at send time, a member on a new device receives subsequent group messages under its new identity like any 1:1. A copy that raced a key change and fails to decrypt is repaired by the **`undecryptable` negative-ack** ([§2.1](#21-key-lifecycle-logout--single-active-device-policy)).
+### 6.3 Sending
 
-> **Security trade-off.** This model gives the same per-message confidentiality and per-sender authenticity as 1:1, and "a removed member stops receiving new messages." It does **not** provide cryptographic forward/backward secrecy across membership changes. A richer sender-key / MLS scheme that adds those guarantees is deferred — see [FUTURE_EXTENSIONS.md §10](FUTURE_EXTENSIONS.md#10-group-sender-keys--rotation). Cost scales as O(N) ciphertexts per message, acceptable for the small groups Phase 1 targets.
+1. Refresh the **roster and epoch** (`GET /groups/{id}`); exclude the sender's own id, leaving the other members as recipients.
+2. **Distribute** the current-epoch Sender Key (SKDM) to any member missing it ([§6.2](#62-distribution-lazy-at-send-time)).
+3. **Encrypt once** with the Sender Key and `POST /messages` a single time with the `groupId` and no `recipientId`. The Server stores the one payload and fans it out.
+
+### 6.4 Receiving
+
+- A **1:1 payload** is unwrapped from its control envelope: an ordinary **chat** is decrypted and stored; an **SKDM** silently stores the peer's Sender Key for that `(groupId, epoch)` and is acknowledged with a delivery receipt (nothing is shown); a **re-delivered group message** (a chat that carries a `groupId`, [§6.5](#65-membership-epoch--new-devices)) is decrypted by the pairwise ratchet and filed into that group conversation, then acknowledged like any message.
+- A **group payload** is decrypted with the sender's distributed Sender Key: verify the signature, derive/advance the peer chain to the message's iteration (out-of-order messages are handled by a bounded skipped-key cache), then AES-256-GCM decrypt. The result is re-encrypted with the local DB master key and persisted like any message ([§5](#5-loading-messages-in-the-gui)). When syncing the inbox, 1:1 messages (which include SKDMs) are processed **before** group messages so a Sender Key that arrives in the same batch is available.
+
+### 6.5 Membership, epoch & new devices
+
+- **Roster** is owned by the Server (`groups` + `group_members`); the owner adds/removes members (`PATCH /members`), any member may leave (`DELETE /members/me`).
+- **Adding** a member requires no re-key: on the next send the sender simply distributes its current Sender Key to the newcomer.
+- **Removing** a member bumps the group's server-authoritative **`epoch`**. Because keys are namespaced by `(groupId, epoch)`, remaining members mint a fresh Sender Key on their next send and the removed member — holding only stale-epoch chain keys — is cut off (backward secrecy). Clients observe the new epoch when they refresh the roster at send time and prune old-epoch keys.
+- **New device / undecryptable:** a group payload that cannot be decrypted (no Sender Key, or a chain already ratcheted past it) triggers the **`undecryptable` negative-ack** ([§2.1](#21-key-lifecycle-logout--single-active-device-policy)). The Server drops that member's pending copy and relays the NACK, and the sender then does two things for that member: it **re-delivers that one message** — re-encrypting the plaintext over the pairwise **Double Ratchet** and sending it as an ordinary 1:1 message that carries the `groupId` inside its envelope (a fresh wire id, targeted at the single member, no server or schema change) — and **redistributes** its current Sender Key so their *future* group messages decrypt. Re-encryption is required because the stored Sender-Key ciphertext is bound to an iteration the member's freshly seeded chain has already passed. Loop-safe: the message is re-delivered **at most once per member**; if it still cannot be read, it is treated as lost — consistent with "a new device loses history".
+
+> **Security properties.** Per-message confidentiality and per-sender authenticity (signed). Forward secrecy per sender stream (ratcheting chain key). Backward secrecy across member removal via the epoch bump. Cost is O(1) ciphertext per message and a single stored copy, plus O(new-members) one-time SKDMs.
+
 

@@ -244,7 +244,7 @@
       "post": {
         "tags": ["Messages"],
         "summary": "Send an encrypted message",
-        "description": "Submits an E2E-encrypted, sender-signed message. The Server is the sole entry point for sending (clients never send through a Hub). It takes durable ownership and publishes the payload to RabbitMQ for live delivery. 'senderId' is set from the authenticated session; any client-provided value is ignored.",
+        "description": "Submits an E2E-encrypted, sender-signed message. 'senderId' is set from the authenticated session; any client-provided value is ignored. A message targets exactly one destination: a 1:1 message carries 'recipientId' (no 'groupId'); a group message carries 'groupId' (no 'recipientId').",
         "operationId": "sendMessage",
         "security": [{ "BearerAuth": [] }],
         "requestBody": {
