@@ -165,6 +165,8 @@ Groups reuse the identical path per member for the pairwise SKDM channel, so a m
 
 fourletters delegates all 1:1 message crypto to the **Signal protocol**: **X3DH** sets up a shared session from a fetched pre-key bundle, and the **Double Ratchet** encrypts and authenticates every subsequent message with a fresh key. There is **no per-message detached signature on chat messages** — the ratchet itself provides confidentiality, integrity and authenticity, with forward secrecy and post-compromise security. fourletters only adds an explicit identity-key signature to **receipts**, because those travel outside the ratchet (relayed by the Server) and must be trustworthy without trusting any Hub.
 
+The encrypted plaintext is a small **content envelope** `{ ts, ct, x }` — the sender's send time (`ts`, epoch ms), a content type (`ct`, currently `text`), and the content (`x`). Every device orders a message by `ts` rather than its own arrival time, so the timeline is identical on all devices. The same content envelope is used for group messages.
+
 ### Sending (on Alice's device)
 
 1. **Open a session if needed.** If there is no `signalSessions` entry for Bob, fetch his bundle (`GET /keys/{userId}`, which consumes a one-time pre-key) and run **X3DH** to establish the session.

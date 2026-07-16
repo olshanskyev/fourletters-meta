@@ -264,4 +264,18 @@ A rollout is **client-driven** (only the client holds the signed pre-key's priva
 **No server-side work.** The `public_keys` row holds a **single** signed-pre-key triple that is simply **overwritten** on each `PUT /keys`; the server never accumulates old signed pre-keys, so there is **no DB-cleaner job and no schema change** — all retention/cleanup lives on the client.
 
 
+---
+
+## 12. Message Ordering — Causal Order Under an Untrusted Hub
+
+**Phase 1 (implemented):** each message carries the sender's send time `ts` **inside the E2E envelope** (so the Hub cannot alter it — see [MESSAGE_SECURITY.md §4](MESSAGE_SECURITY.md#4-message-security)). On receipt the client orders by `ts` but **clamps only the future**: a send time more than `MAX_CLOCK_SKEW` (5 min) ahead of local arrival is capped, while a *late* (past) send time is kept as-is — a delayed message keeps its real position instead of jumping to the bottom. Both the raw sender time (`sentAt`) and arrival time (`receivedAt`) are stored alongside the ordering key (`createdAt`) so ordering can be revisited **losslessly** later. This is the pragmatic 80/20: it fixes the common "reply appears before the question" case from network delay, and an in-envelope `ts` blocks the Hub from forging order.
+
+**What it does not solve:** ordering by `ts` still trusts the *sender's* clock for their own message. A lone malicious sender can inflate `ts` (up to the clamp) to nudge position, and two genuinely concurrent messages have no canonical order — so different members of a **group** can see slightly different transcripts. This is acceptable for chat but not for a provable shared history.
+
+**Deferred hardening (only if group-transcript consistency or an actively-reordering Hub becomes a real requirement):**
+1. **Lamport counter in the envelope** — each device sends `lamport = max(all lamports seen in this conversation) + 1`, signed inside the envelope. Ordering key becomes `(lamport, ts, senderId)`; `ts` drops to a display hint. This gives a **total causal order across senders** that the Hub cannot forge: if I saw your message before sending mine, mine sorts after, guaranteed. Requires persisting a per-conversation "highest lamport seen" high-water mark (transactional read-modify-write, same pattern as `adjustUnreadCount`).
+2. **`prevMessageId` hash-link** — each message references the hash/id of the last message its sender had seen, forming a signed DAG. A sender **cannot** claim to precede a message they demonstrably already acknowledged, closing the lone-sender inflation gap that Lamport alone leaves open.
+3. **Transcript agreement** — periodically exchange a signed hash of recent conversation state so two honest members can **detect** a Hub feeding them divergent histories (equivocation), even though a relay can always drop/delay.
+
+All three live **inside the E2E envelope**, so they need no Hub cooperation and no wire change the Hub can observe — consistent with the "the relay is a blind, replaceable pipe" principle in [§1](#1-the-untrusted-hub-trust-model).
 
