@@ -263,6 +263,22 @@
           }
         }
       },
+      "ReceiptBatchRequest": {
+        "type": "object",
+        "required": ["receipts"],
+        "description": "Submits several signed receipts in one call.",
+        "properties": {
+          "receipts": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 100,
+            "items": {
+              "$ref": "#/components/schemas/DeliveryReceipt"
+            },
+            "description": "The signed receipts to record, capped per request."
+          }
+        }
+      },
       "SignedPreKey": {
         "type": "object",
         "required": ["keyId", "publicKey", "signature"],

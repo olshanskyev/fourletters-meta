@@ -340,6 +340,28 @@
         }
       }
     },
+    "/receipts/batch": {
+      "post": {
+        "tags": ["Messages"],
+        "summary": "Submit several signed receipts in one call",
+        "description": "Records a batch of signed receipts in a single request",
+        "operationId": "submitReceipts",
+        "security": [{ "BearerAuth": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "./models.json#/components/schemas/ReceiptBatchRequest" }
+            }
+          }
+        },
+        "responses": {
+          "204": { "description": "Receipts accepted" },
+          "400": { "description": "Empty or oversized batch, or a malformed receipt" },
+          "401": { "description": "Unauthorized - Missing or invalid access token" }
+        }
+      }
+    },
     "/hubs/register": {
       "post": {
         "tags": ["Hubs"],
