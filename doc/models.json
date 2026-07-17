@@ -518,6 +518,10 @@
             },
             "description": "The current roster."
           },
+          "avatarUrl": {
+            "type": "string",
+            "description": "Group avatar image as a base64 data URL, if set."
+          },
           "createdAt": {
             "type": "integer",
             "format": "int64",
@@ -574,6 +578,10 @@
               "format": "uuid"
             },
             "description": "Initial member user ids (the owner is added automatically if omitted)."
+          },
+          "avatarUrl": {
+            "type": "string",
+            "description": "Optional group avatar image as a base64 data URL."
           }
         }
       },
@@ -596,6 +604,20 @@
               "format": "uuid"
             },
             "description": "User ids to remove from the roster."
+          }
+        }
+      },
+      "UpdateGroupRequest": {
+        "type": "object",
+        "description": "Owner-only partial update of a group's metadata. Only the provided fields are changed.",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "New group name (plaintext). Omit to leave unchanged."
+          },
+          "avatarUrl": {
+            "type": "string",
+            "description": "Base64 data URL to set the avatar, an empty string to clear it, or omit to leave it unchanged."
           }
         }
       },

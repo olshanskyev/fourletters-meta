@@ -656,6 +656,43 @@
           "403": { "description": "Caller is not a member of the group" },
           "404": { "description": "Group not found" }
         }
+      },
+      "patch": {
+        "tags": ["Groups"],
+        "summary": "Update group metadata (owner only)",
+        "description": "Partially updates a group's metadata (name and/or avatar). Only the provided fields are changed. The avatar is a base64 data URL stored plaintext server-side.",
+        "operationId": "updateGroup",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [
+          {
+            "name": "groupId",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string", "format": "uuid" }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "./models.json#/components/schemas/UpdateGroupRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Group updated",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "./models.json#/components/schemas/Group" }
+              }
+            }
+          },
+          "400": { "description": "Malformed request or avatar too large" },
+          "401": { "description": "Unauthorized - Missing or invalid access token" },
+          "403": { "description": "Caller is not the group owner" },
+          "404": { "description": "Group not found" }
+        }
       }
     },
     "/groups/{groupId}/members": {
