@@ -75,7 +75,7 @@ services:
       #   openssl rsa -in certs/jwt/private_key.pem -pubout -out certs/jwt/public_key.pem
       - ${JWT_KEYS_DIR:-./certs/jwt}:/run/secrets/jwt:ro
     # Cap memory so the container-aware JVM sizes its heap to this limit.
-    mem_limit: ${SERVER_MEM_LIMIT:-512m}
+    mem_limit: ${SERVER_MEM_LIMIT:-768m}
     networks:
       - fourletters-net
     logging:
