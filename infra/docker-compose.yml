@@ -1,0 +1,154 @@
+services:
+  db:
+    image: ghcr.io/olshanskyev/fourletters-db:dev-latest
+    container_name: fourletters-db
+    environment:
+      # Names substituted into the __VAR__ placeholders inside the init SQL scripts.
+      - SUBSTITUTE_VARS=DATABASE_SCHEMA POSTGRES_USER
+      - POSTGRES_USER=${DATABASE_USER}
+      - POSTGRES_PASSWORD=${DATABASE_PASSWORD}
+      - POSTGRES_DB=${DATABASE_NAME:-FOURLETTERS}
+      - DATABASE_SCHEMA=${DATABASE_SCHEMA:-FOURLETTERS}
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    networks:
+      - fourletters-net
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    restart: unless-stopped
+
+  rabbitmq:
+    image: ghcr.io/olshanskyev/fourletters-rabbitmq:dev-latest
+    container_name: fourletters-rabbitmq
+    environment:
+      # Passwords are hashed into definitions.json by the image entrypoint at boot.
+      - RABBITMQ_ADMIN_PASSWORD=${RABBITMQ_ADMIN_PASSWORD}
+      - RABBITMQ_SERVER_PASSWORD=${RABBITMQ_SERVER_PASSWORD}
+      - RABBITMQ_HUB_PASSWORD=${RABBITMQ_HUB_PASSWORD}
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    networks:
+      - fourletters-net
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    restart: unless-stopped
+
+  server:
+    image: ghcr.io/olshanskyev/fourletters-server:dev-latest
+    container_name: fourletters-server
+    environment:
+      # No SPRING_PROFILES_ACTIVE -> the env-driven `default` profile is used.
+      - DATABASE_HOST=db
+      - DATABASE_PORT=5432
+      - DATABASE_NAME=${DATABASE_NAME:-FOURLETTERS}
+      - DATABASE_SCHEMA=${DATABASE_SCHEMA:-FOURLETTERS}
+      - DATABASE_USER=${DATABASE_USER}
+      - DATABASE_PASSWORD=${DATABASE_PASSWORD}
+      - RABBITMQ_HOST=rabbitmq
+      - RABBITMQ_PORT=5672
+      - RABBITMQ_SERVER_USER=fourletters-server
+      - RABBITMQ_SERVER_PASSWORD=${RABBITMQ_SERVER_PASSWORD}
+      - RABBITMQ_VHOST=/
+      - ALLOWED_ORIGIN_PATTERNS=${ALLOWED_ORIGIN_PATTERNS}
+      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
+      - HUB_REGISTRATION_SECRET=${HUB_REGISTRATION_SECRET}
+      # JWT signing keys mounted read-only from the host (see volumes below).
+      # The 'file:' prefix is required so Spring's DefaultResourceLoader reads them
+      # from the filesystem instead of the classpath.
+      - JWT_PRIVATE_KEY_PATH=file:/run/secrets/jwt/private_key.pem
+      - JWT_PUBLIC_KEY_PATH=file:/run/secrets/jwt/public_key.pem
+      - PUSH_VAPID_PUBLIC_KEY=${PUSH_VAPID_PUBLIC_KEY:-}
+      - PUSH_VAPID_PRIVATE_KEY=${PUSH_VAPID_PRIVATE_KEY:-}
+      - PUSH_VAPID_SUBJECT=${PUSH_VAPID_SUBJECT:-mailto:olshanskyev@gmail.com}
+    depends_on:
+      - db
+      - rabbitmq
+    volumes:
+      # Mount the JWT signing key pair read-only. Generate it with:
+      #   openssl genpkey -algorithm RSA -out certs/jwt/private_key.pem
+      #   openssl rsa -in certs/jwt/private_key.pem -pubout -out certs/jwt/public_key.pem
+      - ${JWT_KEYS_DIR:-./certs/jwt}:/run/secrets/jwt:ro
+    networks:
+      - fourletters-net
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    restart: unless-stopped
+
+  hub:
+    image: ghcr.io/olshanskyev/fourletters-hub:dev-latest
+    container_name: fourletters-hub
+    environment:
+      - RABBITMQ_HOST=rabbitmq
+      - RABBITMQ_PORT=5672
+      - RABBITMQ_HUB_USER=fourletters-hub
+      - RABBITMQ_HUB_PASSWORD=${RABBITMQ_HUB_PASSWORD}
+      - RABBITMQ_VHOST=/
+      - ALLOWED_ORIGIN_PATTERNS=${ALLOWED_ORIGIN_PATTERNS}
+      # The Hub verifies access tokens against the Server's JWKS endpoint and
+      # registers itself with the Server on boot using the shared secret.
+      - JWT_PUBLIC_KEY_URL=http://server:8080/server/api/v1/auth/jwks
+      - HUB_REGISTRATION_URL=http://server:8080/server/api/v1/hubs/register
+      - HUB_REGISTRATION_TOKEN=${HUB_REGISTRATION_SECRET}
+    depends_on:
+      - server
+      - rabbitmq
+    networks:
+      - fourletters-net
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    restart: unless-stopped
+
+  gui:
+    image: ghcr.io/olshanskyev/fourletters-gui:dev-latest
+    container_name: fourletters-gui
+    environment:
+      # Names substituted into the __VAR__ placeholders inside the built app + nginx config.
+      - SUBSTITUTE_VARS=BASE_URL_SERVER BASE_URL_HUB VK_APP_ID GOOGLE_CLIENT_ID OAUTH_REDIRECT_URL UMAMI_WEBSITE_ID PUSH_VAPID_PUBLIC_KEY HOST CERT_PATH
+      - BASE_URL_SERVER=${BASE_URL_SERVER}
+      - BASE_URL_HUB=${BASE_URL_HUB}
+      - VK_APP_ID=${VK_APP_ID:-0}
+      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
+      - OAUTH_REDIRECT_URL=${OAUTH_REDIRECT_URL}
+      - UMAMI_WEBSITE_ID=${UMAMI_WEBSITE_ID:-}
+      - PUSH_VAPID_PUBLIC_KEY=${PUSH_VAPID_PUBLIC_KEY:-}
+      - HOST=${HOST:-localhost}
+      - CERT_PATH=${CERT_PATH:-}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./certbot/conf:/etc/letsencrypt
+      - ./certbot/www:/var/www/certbot
+    depends_on:
+      - server
+      - hub
+    networks:
+      - fourletters-net
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    restart: unless-stopped
+
+networks:
+  fourletters-net:
+    driver: bridge
+
+volumes:
+  db_data:
+    driver: local
+  rabbitmq_data:
+    driver: local
