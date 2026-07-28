@@ -57,6 +57,9 @@ services:
       - RABBITMQ_VHOST=/
       - ALLOWED_ORIGIN_PATTERNS=${ALLOWED_ORIGIN_PATTERNS}
       - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
+      # VK_APP_ID doubles as the OAuth client_id the server uses to verify the id_token.
+      - VK_CLIENT_ID=${VK_APP_ID:-0}
+      - VK_BASE_URL=${VK_BASE_URL:-https://id.vk.ru}
       - HUB_REGISTRATION_SECRET=${HUB_REGISTRATION_SECRET}
       # JWT signing keys mounted read-only from the host (see volumes below).
       # The 'file:' prefix is required so Spring's DefaultResourceLoader reads them
