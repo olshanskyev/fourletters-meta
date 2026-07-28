@@ -74,6 +74,8 @@ services:
       #   openssl genpkey -algorithm RSA -out certs/jwt/private_key.pem
       #   openssl rsa -in certs/jwt/private_key.pem -pubout -out certs/jwt/public_key.pem
       - ${JWT_KEYS_DIR:-./certs/jwt}:/run/secrets/jwt:ro
+    # Cap memory so the container-aware JVM sizes its heap to this limit.
+    mem_limit: ${SERVER_MEM_LIMIT:-512m}
     networks:
       - fourletters-net
     logging:
@@ -101,6 +103,8 @@ services:
     depends_on:
       - server
       - rabbitmq
+    # Cap memory so the container-aware JVM sizes its heap to this limit.
+    mem_limit: ${HUB_MEM_LIMIT:-384m}
     networks:
       - fourletters-net
     logging:
