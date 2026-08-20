@@ -238,6 +238,13 @@ sequenceDiagram
     M2->>Server: POST /receipts (drop M2 - last one, drop payload)
 ```
 
+### 2.8 Client Telemetry & Error Reporting
+
+The PWA captures its own **warnings and errors** and ships them to the Server for offline analysis, so client-side failures are visible without asking users for console logs. Capture is passive: `console.warn`/`console.error` are wrapped, and because Angular's global error listeners route uncaught errors and rejections through the default handler (which calls `console.error`), a single console patch covers both explicit logs and uncaught failures.
+
+Each event is recorded as an **OpenTelemetry LogRecord** (`severityText` WARN/ERROR, `severityNumber`, `body`, `timeUnixNano` as an OTLP/JSON int64 string, and a small `attributes` map). Records are buffered in a standalone IndexedDB store — separate from the per-user database, so failures raised **before login** or across account switches are still retained — and flushed in redacted batches to `POST /telemetry/logs` (authenticated with the Access JWT). A final small batch is flushed on page hide via `fetch` keepalive. The Server enriches each record with the caller's user id and a receive time and **appends it as one JSON line** to a file (a Docker volume in production), ready to grep or feed into Loki/Grafana.
+
+**Privacy:** the payload is diagnostics only. Bodies and attributes are scrubbed of tokens, JWTs, emails and long blobs before leaving the device, and telemetry **never carries end-to-end message content** — consistent with the E2E model elsewhere in this document.
 
 ## 3. Storage Strategy
 

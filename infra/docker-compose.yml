@@ -69,6 +69,8 @@ services:
       - PUSH_VAPID_PUBLIC_KEY=${PUSH_VAPID_PUBLIC_KEY:-}
       - PUSH_VAPID_PRIVATE_KEY=${PUSH_VAPID_PRIVATE_KEY:-}
       - PUSH_VAPID_SUBJECT=${PUSH_VAPID_SUBJECT:-mailto:olshanskyev@gmail.com}
+      # Client telemetry JSON-lines file, written into the persistent volume below.
+      - TELEMETRY_LOG_FILE=/var/log/telemetry/client-telemetry.jsonl
     depends_on:
       - db
       - rabbitmq
@@ -77,6 +79,8 @@ services:
       #   openssl genpkey -algorithm RSA -out certs/jwt/private_key.pem
       #   openssl rsa -in certs/jwt/private_key.pem -pubout -out certs/jwt/public_key.pem
       - ${JWT_KEYS_DIR:-./certs/jwt}:/run/secrets/jwt:ro
+      # Persist client telemetry logs across container restarts/rebuilds.
+      - telemetry_logs:/var/log/telemetry
     # Cap memory so the container-aware JVM sizes its heap to this limit.
     mem_limit: ${SERVER_MEM_LIMIT:-768m}
     networks:
@@ -158,4 +162,6 @@ volumes:
   db_data:
     driver: local
   rabbitmq_data:
+    driver: local
+  telemetry_logs:
     driver: local

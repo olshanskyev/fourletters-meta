@@ -35,6 +35,10 @@
     {
       "name": "Users",
       "description": "User profile directory: display name and avatar lookups"
+    },
+    {
+      "name": "Telemetry",
+      "description": "Client telemetry and error-log ingestion"
     }
   ],
   "paths": {
@@ -752,6 +756,36 @@
           "204": { "description": "Left the group" },
           "401": { "description": "Unauthorized - Missing or invalid access token" },
           "404": { "description": "Group not found or caller not a member" }
+        }
+      }
+    },
+    "/telemetry/logs": {
+      "post": {
+        "tags": ["Telemetry"],
+        "summary": "Ingest client telemetry LogRecords",
+        "description": "An authenticated client submits a batch of redacted OpenTelemetry LogRecords (warnings and errors).",
+        "operationId": "submitTelemetryLogs",
+        "security": [{ "BearerAuth": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "./models.json#/components/schemas/TelemetryLogBatch" }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Batch accepted and persisted",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "./models.json#/components/schemas/TelemetryAcceptedResponse" }
+              }
+            }
+          },
+          "400": { "description": "Malformed or oversized telemetry batch" },
+          "401": { "description": "Unauthorized - Missing or invalid access token" },
+          "429": { "description": "Rate limit exceeded for the caller" }
         }
       }
     }

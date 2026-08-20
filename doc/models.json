@@ -695,6 +695,94 @@
             "$ref": "#/components/schemas/PushSubscriptionKeys"
           }
         }
+      },
+      "TelemetryResource": {
+        "type": "object",
+        "description": "OpenTelemetry resource attributes describing the client that produced the log records. Attached once per batch and merged into every persisted LogRecord.",
+        "properties": {
+          "serviceName": {
+            "type": "string",
+            "description": "OTel service.name of the emitting client (e.g. 'fourletters-gui')."
+          },
+          "serviceVersion": {
+            "type": "string",
+            "description": "OTel service.version — the client app/build version."
+          },
+          "sessionId": {
+            "type": "string",
+            "description": "Client-generated session id correlating all records from one app run. Never a user identifier."
+          },
+          "userAgent": {
+            "type": "string",
+            "description": "Browser user agent string of the client."
+          }
+        }
+      },
+      "TelemetryLogRecord": {
+        "type": "object",
+        "required": ["timeUnixNano", "severityText", "body"],
+        "description": "A single OpenTelemetry LogRecord captured on the client. Carries only redacted diagnostics — never end-to-end message content, keys, or tokens.",
+        "properties": {
+          "timeUnixNano": {
+            "type": "string",
+            "description": "Event time as OTel Unix nanoseconds — an int64 encoded as a decimal string (OTLP/JSON convention), avoiding client-side number precision loss."
+          },
+          "severityText": {
+            "type": "string",
+            "enum": ["WARN", "ERROR"],
+            "description": "OTel severity text. Only warnings and errors are captured."
+          },
+          "severityNumber": {
+            "type": "integer",
+            "format": "int32",
+            "description": "OTel SeverityNumber (WARN=13, ERROR=17)."
+          },
+          "body": {
+            "type": "string",
+            "description": "The log message body (redacted)."
+          },
+          "attributes": {
+            "type": "object",
+            "additionalProperties": true,
+            "description": "Redacted OTel attributes (e.g. route, error.name, error.stack, http.status). Must never contain plaintext message content, ciphertext, keys, or auth tokens."
+          }
+        }
+      },
+      "TelemetryLogBatch": {
+        "type": "object",
+        "required": ["logRecords"],
+        "description": "A batch of client OpenTelemetry LogRecords submitted for server-side persistence as JSON lines.",
+        "properties": {
+          "resource": {
+            "$ref": "#/components/schemas/TelemetryResource"
+          },
+          "logRecords": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 500,
+            "items": {
+              "$ref": "#/components/schemas/TelemetryLogRecord"
+            },
+            "description": "The captured LogRecords, capped per request."
+          }
+        }
+      },
+      "TelemetryAcceptedResponse": {
+        "type": "object",
+        "required": ["status", "acceptedCount"],
+        "description": "Server acknowledgement of a persisted telemetry batch.",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": ["accepted"],
+            "description": "The batch was accepted and written to disk."
+          },
+          "acceptedCount": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Number of LogRecords persisted."
+          }
+        }
       }
     }
   }
