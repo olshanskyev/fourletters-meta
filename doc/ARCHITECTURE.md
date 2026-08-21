@@ -183,23 +183,25 @@ The delivery guarantee does **not** rest on RabbitMQ (a relay may consume a mess
 
 > Beyond Phase 1: the resync case of accepted messages is retired once the hot tier moves to a persistent Redis store, which survives restarts (see [FUTURE_EXTENSIONS.md](FUTURE_EXTENSIONS.md)).
 
-On app start the client reconciles its outbox of unconfirmed messages. Resends are idempotent — every copy keeps its original `messageId`, so the Server upserts and the recipient de-duplicates; a resend never creates a duplicate. Each unconfirmed message falls into one of two cases:
+On app start **and on every hub reconnection** the client reconciles its outbox of unconfirmed messages. Resends are idempotent — every copy keeps its original `messageId`, so the Server upserts and the recipient de-duplicates; a resend never creates a duplicate. Each unconfirmed message falls into one of two cases:
 
-*   **Never accepted (`pending`)** — the initial `POST` never succeeded (offline / error), so the Server does not have the message. It is **re-sent**. If it still cannot be accepted it is marked **`failed`** for the user to resend manually.
+*   **Never accepted (`pending`)** — the initial `POST` never succeeded (offline / error), so the Server does not have the message. It stays **`pending`** and is **re-sent on each reconnect** up to a small attempt budget (reconnect is when connectivity has just returned, so it is the natural retry trigger); only once the budget is exhausted is it marked **`failed`** for the user to resend manually.
 *   **Accepted, but the Server restarted (`accepted`)** — a freshly `accepted` message lives only in the hot tier until the hold-window flush, so a Server restart within that window can lose a not-yet-delivered copy. The trigger is `serverStartedAt`, returned on every `accepted` and `/inbox` response: if it changed since the message was sent, the copy may be gone, so the message is **re-pushed once** (`retryCount = 1`). The Server already had it, so this case is never marked `failed`.
 
-A **group** message is a single Sender-Key ciphertext stored once by the Server ([§2.7](#27-group-messaging-sender-keys)); if it is still unconfirmed it is **re-sent** (same `messageId`, idempotent) after the client refreshes the roster/epoch and redistributes its Sender Key to any member missing it. If it still cannot be accepted it is marked **`failed`**.
+A **group** message is a single Sender-Key ciphertext stored once by the Server ([§2.7](#27-group-messaging-sender-keys)); if it is still unconfirmed it is **re-sent** (same `messageId`, idempotent) after the client refreshes the roster/epoch and redistributes its Sender Key to any member missing it. Like a 1:1 send it is retried across reconnects up to the attempt budget, and marked **`failed`** only once the budget is exhausted.
 
 ```mermaid
 flowchart TD
-    Start([App start]) --> Inbox["GET /inbox → save serverStartedAt"]
+    Start([App start or hub reconnect]) --> Inbox["GET /inbox → save serverStartedAt"]
     Inbox --> Each["For each unconfirmed message"]
     Each --> Kind{"Status?"}
     Kind -- "pending (never accepted)" --> Resend["Re-send"]
     Kind -- "accepted + serverStartedAt changed" --> Repush["Re-push once (retryCount = 1)"]
     Resend --> Ok{"Accepted?"}
     Ok -- Yes --> Done["Confirmed"]
-    Ok -- No --> Failed["Mark failed → user resends manually"]
+    Ok -- No --> Budget{"Retry budget left?"}
+    Budget -- Yes --> Pend["Stay pending → retry next reconnect"]
+    Budget -- No --> Failed["Mark failed → user resends manually"]
 ```
 
 ### 2.7 Group Messaging (Sender Keys)

@@ -10,7 +10,7 @@ For the high-level model see [2.4 Message Sending & Receiving](../ARCHITECTURE.m
 | --- | --- | --- | --- |
 | **Hot tier** (`HotTierStorage`) | JVM heap | No (sender's outbox backs it) | Accepted messages during the post-accept hold window |
 | **Cold tier** (`inbox` + `inbox_pending`) | PostgreSQL | Yes | Messages not confirmed within the hold window — single-copy for both 1:1 and group |
-| **Pending receipts** (`PendingReceipts`) | JVM heap | No (resync re-drives) | Delivery/read acks owed to an offline sender |
+| **Pending receipts** (`PendingReceipts`) | JVM heap | No (resync re-drives) | Delivery/read/undecryptable acks owed to a sender — every receipt retained, pulled via `/inbox` |
 
 > **Single-copy storage.** A 1:1 message and a **group** message use the **same** single-copy storage. `accept` keeps one payload plus the set of recipients still owed delivery (hot tier `HotTierStorage.Entry`, cold tier one `inbox` row keyed by `message_id` + one `inbox_pending` row per pending recipient) and publishes a copy to each recipient — a group message (`groupId` set, no `recipientId`) fans out to every `user.<memberId>`, a 1:1 message (no `groupId`) to its single recipient. Each receipt clears **only that recipient** from the pending set; the shared `inbox` payload is dropped by a database trigger once its last `inbox_pending` row is gone. An `undecryptable` NACK drops that member's pending entry and relays the NACK so the sender re-delivers that one message over the pairwise ratchet (a 1:1 message carrying the `groupId`) and redistributes its Sender Key for future messages.
 
@@ -62,8 +62,8 @@ flowchart TD
 
     Rec -->|"drop copy (hot or cold)"| Hot
     Rec -->|"delete row if flushed"| Cold
-    Rec -->|"relay live (mandatory)"| MQ
-    MQ -.->|"receipt unroutable: sender offline → retain"| PR
+    Rec -->|"retain ack (always)"| PR
+    Rec -->|"relay live (best-effort)"| MQ
     MQ -.->|"message unroutable: recipient offline → notify"| Push
 
     Inb -->|"union read (as recipient)"| Hot
@@ -94,32 +94,33 @@ stateDiagram-v2
 
 ## Receipt path (delivered / read / undecryptable)
 
-A receipt carries `originalSenderId`, so relaying it does **not** depend on the retained copy still existing — this is what lets a second receipt (`read` after `delivered`, in any order) still reach the sender. The receipt is published **`mandatory`**: if the sender is **online** it is routed and delivered live (and *nothing* is stored); if the sender is **offline** the broker returns it as unroutable and the Server retains it in `PendingReceipts` for the sender's next `GET /inbox`. This way an online sender never piles up duplicate acks.
+A receipt carries `originalSenderId`, so relaying it does **not** depend on the retained copy still existing — this is what lets a second receipt (`read` after `delivered`, in any order) still reach the sender. Every receipt is **retained** in `PendingReceipts` (keyed per `messageId`, per sender) and **also** published live as a best-effort fast path. The sender applies acks idempotently — live and/or on its next `GET /inbox` — so a receipt survives a **zombie sender binding** (a live publish routed to a silently-dropped connection). The Server does not distinguish a routable from an unroutable sender for receipts.
 
 The Server authenticates the **submitter** of `POST /receipts` via JWT (transport auth) and then relays the recipient's **`signature` unaltered** — live as `ReceiptData.signature` and in `GET /inbox` as `MessageReceipt.signature`. Receipts travel outside the Double Ratchet, so each carries an explicit identity-key signature: it is the end-to-end proof the **original sender** verifies against the key directory; server-side verification is optional (reject-early) and never the load-bearing check.
 
 ```mermaid
 flowchart TD
     Start([Recipient sends receipt]) --> Drop["recordReceipt: drop retained message copy (first receipt only)"]
-    Drop --> Live["relay receipt live, mandatory"]
-    Live --> Online{Sender online?<br/> routable binding}
-    Online -- "Yes (routed)" --> Got["Sender gets it instantly → ✓✓ / read<br/> (nothing stored)"]
-    Online -- "No (returned unroutable)" --> Store["Server retains it in PendingReceipts (heap)"]
-    Store --> Pull["Sender reconnects → GET /inbox drains pending receipts"]
+    Drop --> Retain["retain ack in PendingReceipts (always)"]
+    Retain --> Live["also relay live (best-effort fast path)"]
+    Live --> Online{Sender reachable?}
+    Online -- "Yes" --> Got["Sender gets it instantly → ✓✓ / read"]
+    Online -- "No (offline or zombie binding)" --> Pull["Sender's next GET /inbox drains the retained ack"]
     Pull --> Got
 ```
 
-- **Online senders cost nothing extra:** routable receipts are never stored, so a busy conversation does not accumulate thousands of acks to re-send.
+- **Durable against zombie bindings:** because every ack is retained (not only when the sender is offline), a receipt relayed to a routable-but-dead sender binding is still delivered on the sender's next `GET /inbox`.
+- **Cost:** acks accumulate per message until drained, so a busy conversation grows `PendingReceipts` and enlarges the `/inbox` response — a per-conversation **watermark** would bound this (see [FUTURE_EXTENSIONS.md §14](../FUTURE_EXTENSIONS.md#14-receipt-delivery--watermark-model)).
 - **Non-durable on purpose:** a Server restart clears `PendingReceipts`; the sender then detects the restart (`serverStartedAt` changed) and resyncs, which re-drives the receipt.
 - `read` supersedes `delivered` for the same message, so only the latest status per message is retained.
-- Requires `spring.rabbitmq.publisher-returns: true`; both **messages** and **receipts** are published `mandatory`. An unroutable **receipt** is retained in `PendingReceipts`; an unroutable **message** triggers a Web Push notification (see [Push notifications](#push-notifications)).
+- Requires `spring.rabbitmq.publisher-returns: true` for **messages**: an unroutable message triggers a Web Push notification (see [Push notifications](#push-notifications)). Receipts are retained at record time, so a returned (unroutable) receipt needs no action.
 
 ### `undecryptable` — the negative ack
 
-An `undecryptable` receipt travels the **same `recordReceipt` path** — drop the retained copy, relay `mandatory` to the sender — but means the opposite of `delivered`: the recipient got the bytes yet could **not** decrypt them, because the payload was sealed to a **stale Signal identity / pre-key** (the recipient has since logged in on a new device and rotated keys, so the Double Ratchet has no matching session). Dropping the copy is still correct: *no key in existence can decrypt it*, so re-delivery is futile. The repair happens **end-to-end at the sender**, not on the Server:
+An `undecryptable` receipt travels the **same `recordReceipt` path** — drop the retained copy, retain and relay the NACK to the sender — but means the opposite of `delivered`: the recipient got the bytes yet could **not** decrypt them, because the payload was sealed to a **stale Signal identity / pre-key** (the recipient has since logged in on a new device and rotated keys, so the Double Ratchet has no matching session). Dropping the copy is still correct: *no key in existence can decrypt it*, so re-delivery is futile. The repair happens **end-to-end at the sender**, not on the Server:
 
 1. Recipient's ratchet decrypt fails (no session / stale pre-key) → it returns a signed `undecryptable` receipt instead of `delivered`, then discards the message locally.
-2. Server drops the retained copy and relays the NACK (live, or via `PendingReceipts` if the sender is offline) — identical machinery to a `delivered`.
+2. Server drops the retained copy and relays the NACK (retained in `PendingReceipts` and relayed live) — identical machinery to a `delivered`, and the real `undecryptable` type is preserved through `/inbox` so the sender still re-keys.
 3. Sender receives `undecryptable` → re-fetches the recipient's current pre-key bundle (which also re-pins the identity, surfacing *“security code changed”*, see [MESSAGE_SECURITY.md §3.1](../MESSAGE_SECURITY.md#31-key-change-detection-security-code-changed)) → opens a fresh session and **resends the same `messageId` once**.
 4. The resend is a brand-new copy through the normal hot/cold path; it now decrypts and is cleared by an ordinary `delivered`.
 

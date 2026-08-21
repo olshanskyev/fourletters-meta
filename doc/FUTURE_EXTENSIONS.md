@@ -301,3 +301,24 @@ All three live **inside the E2E envelope**, so they need no Hub cooperation and 
 **Forward-compatibility.** Because the preview rides **inside the E2E envelope**, adding it later needs no change to the send path, the inbox, or the message wire schema the Server sees — only a new content field, the `/unfurl` endpoint, and the card component. This mirrors the "everything new lives inside the encrypted envelope" principle used throughout this document.
 
 
+## 14. Receipt Delivery — Watermark Model
+
+**Phase 1 (implemented):** the Server retains **every** relayed receipt in the in-memory `PendingReceipts` backstop (per `messageId`, per sender) and also publishes it live as a best-effort fast path. The sender applies acks idempotently — live and/or on its next `GET /inbox` — so a receipt survives a **zombie sender binding** (a live publish routed to a silently-dropped connection) instead of being lost. See [messages-lifecycle.md](algorithms/messages-lifecycle.md#receipt-path-delivered--read--undecryptable).
+
+**The cost this introduces:** because acks are now retained per message rather than only when the sender is offline, a busy 1:1 or group conversation can accumulate **many** owed receipts, so a sender's next `/inbox` can return a large receipt list and the backstop holds more memory. `PendingReceipts` is also non-durable (a restart drops it, recovered by resync), and receipts are still **delete-on-read** in `getInbox` (a lost `/inbox` response loses that drain).
+
+**Deferred: collapse per-message receipts into a per-conversation watermark.** Instead of one retained ack per `messageId`, keep a single moving cursor per (sender, peer):
+
+- `deliveredUpTo` and `readUpTo` — a monotonic message sequence or send timestamp (read ≥ delivered).
+- A new receipt just **advances the watermark**; it never stores a per-message row.
+- `GET /inbox` returns a handful of watermarks (one per active peer), never thousands of receipts.
+- The client applies it in bulk: any of its messages with `createdAt ≤ readUpTo` → read, `≤ deliveredUpTo` → delivered.
+
+This bounds both storage and `/inbox` payload to **O(conversations)** rather than O(messages), and stays idempotent. It is how Signal/WhatsApp model read state — a moving cursor, not a receipt per message.
+
+**Tension with the signed-receipt contract.** Phase 1 receipts are **signed per message** by the recipient's identity key — a forward-compatible contract that lets untrusted volunteer Hubs be enabled later ([ARCHITECTURE.md §2.5](ARCHITECTURE.md#25-delivery-guarantee-server-retained-copy--signed-receipt)). A single watermark is not a per-message signature, so a pure watermark model weakens that proof unless the **watermark itself is signed** (peer + `readUpTo` + timestamp, signed by the recipient's identity key). Signing the cursor preserves the end-to-end guarantee while collapsing volume.
+
+**Optional hardening — explicit ack instead of delete-on-read.** To also close the delete-on-read window (a lost `/inbox` response dropping drained acks), make `getInbox` return owed acks/watermarks **without** clearing them, and have the client send an explicit acknowledge (or a "applied up to" cursor) that the Server uses to drop them — turning receipt delivery into at-least-once. This is a small client change and is orthogonal to the watermark collapse.
+
+
+
