@@ -279,3 +279,25 @@ A rollout is **client-driven** (only the client holds the signed pre-key's priva
 
 All three live **inside the E2E envelope**, so they need no Hub cooperation and no wire change the Hub can observe — consistent with the "the relay is a blind, replaceable pipe" principle in [§1](#1-the-untrusted-hub-trust-model).
 
+---
+
+## 13. Link Previews (Open Graph Unfurling)
+
+**Phase 1 (implemented):** URLs inside a text message are made **clickable**. A pure client pipe splits the decrypted text into plain/hyperlink segments and the template renders `<a rel="noopener noreferrer nofollow" target="_blank">` for `http(s)` targets only (Angular additionally sanitizes the `href`). No network call, no metadata fetch — purely presentational.
+
+**Deferred: rich Open Graph cards** (title, description, thumbnail, site name) for links. The hard part is not rendering — it is **who fetches the target URL**, which is a privacy decision in an E2E system, not a UI one.
+
+**Rejected approach — recipient fetches on render.** Having each viewer fetch the link to read its `<meta og:*>` tags fails twice: (a) **CORS** blocks the browser from reading almost any third-party page's HTML, and (b) every recipient hitting the URL **leaks their IP** and "I received this link" to the target site — a metadata deanonymization leak that contradicts the E2E model. Hotlinking the OG image has the same IP-leak problem.
+
+**Recommended approach — sender unfurls once, preview travels inside the envelope** (the Signal/WhatsApp model):
+
+1. **Detect** the first URL at send time (reuse the Phase 1 linkify logic).
+2. **Unfurl on the Server**, not the client, via a small authenticated endpoint `POST /unfurl {url}` that fetches the page, parses the OG/Twitter meta tags, and **downscales the preview image to a small data URL**. Server-side fetching sidesteps CORS, and returning a shrunk inline image means recipients never hotlink the origin (no IP leak, no mixed content). This endpoint is **security-critical** and must carry **SSRF protection**: allow only `http(s)`, resolve the host and reject private/loopback/link-local ranges, cap redirects, body size and timeout, and strip credentials.
+3. **Embed** the resulting `{ url, title, description, image, siteName }` in the message's **encrypted content** (extend `MessageContent` with an optional `preview`), so it is E2E-encrypted like the text. The Server's message path is unchanged — the preview is opaque ciphertext to it.
+4. **Render** with a presentational `LinkPreviewComponent` (a Material card) shown under the bubble. Every recipient renders it with **zero network calls**, because the sender already did the fetch.
+
+**Trade-off the sender accepts:** only the *sender* touches the link (the Server sees the URL during unfurl, but not the conversation, and never the recipients). The sender may opt out per-message (e.g. a toggle) to avoid unfurling sensitive links. This confines the single unavoidable fetch to the one party that already has the link, and keeps recipients — the parties whose metadata most needs protecting — completely passive.
+
+**Forward-compatibility.** Because the preview rides **inside the E2E envelope**, adding it later needs no change to the send path, the inbox, or the message wire schema the Server sees — only a new content field, the `/unfurl` endpoint, and the card component. This mirrors the "everything new lives inside the encrypted envelope" principle used throughout this document.
+
+
