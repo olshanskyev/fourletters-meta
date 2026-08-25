@@ -40,7 +40,23 @@
         "message": {
           "oneOf": [
             { "$ref": "#/components/messages/MessageEvent" },
-            { "$ref": "#/components/messages/ReceiptEvent" }
+            { "$ref": "#/components/messages/ReceiptEvent" },
+            { "$ref": "#/components/messages/PresenceEvent" },
+            { "$ref": "#/components/messages/TypingEvent" },
+            { "$ref": "#/components/messages/PongEvent" }
+          ]
+        }
+      },
+      "publish": {
+        "summary": "Client sends a control frame to the Hub",
+        "description": "The Hub is otherwise receive-only; these are the only frames it acts on. Presence subscribe/unsubscribe manage which contacts' live state the client receives; typing announces the sender is typing; ping is an application-level liveness probe answered by a pong.",
+        "operationId": "sendToHub",
+        "message": {
+          "oneOf": [
+            { "$ref": "#/components/messages/PresenceSubscribeCommand" },
+            { "$ref": "#/components/messages/PresenceUnsubscribeCommand" },
+            { "$ref": "#/components/messages/TypingCommand" },
+            { "$ref": "#/components/messages/PingCommand" }
           ]
         }
       }
@@ -69,6 +85,62 @@
         "summary": "A delivery, read, or undecryptable notification relayed live to the original sender",
         "payload": {
           "$ref": "./models.json#/components/schemas/ReceiptEvent"
+        }
+      },
+      "PresenceEvent": {
+        "name": "PresenceEvent",
+        "title": "Contact Presence",
+        "summary": "A watched contact's online/offline state",
+        "payload": {
+          "$ref": "./models.json#/components/schemas/PresenceEvent"
+        }
+      },
+      "TypingEvent": {
+        "name": "TypingEvent",
+        "title": "Contact Typing",
+        "summary": "A watched contact is typing",
+        "payload": {
+          "$ref": "./models.json#/components/schemas/TypingEvent"
+        }
+      },
+      "PongEvent": {
+        "name": "PongEvent",
+        "title": "Pong",
+        "summary": "Reply to a client Ping",
+        "payload": {
+          "$ref": "./models.json#/components/schemas/PongEvent"
+        }
+      },
+      "PresenceSubscribeCommand": {
+        "name": "PresenceSubscribeCommand",
+        "title": "Subscribe to Contact Presence",
+        "summary": "Start receiving a contact's online/typing state",
+        "payload": {
+          "$ref": "./models.json#/components/schemas/PresenceSubscribeCommand"
+        }
+      },
+      "PresenceUnsubscribeCommand": {
+        "name": "PresenceUnsubscribeCommand",
+        "title": "Unsubscribe from Contact Presence",
+        "summary": "Stop receiving a contact's state",
+        "payload": {
+          "$ref": "./models.json#/components/schemas/PresenceUnsubscribeCommand"
+        }
+      },
+      "TypingCommand": {
+        "name": "TypingCommand",
+        "title": "Typing",
+        "summary": "Announce the sender is typing in their active chat",
+        "payload": {
+          "$ref": "./models.json#/components/schemas/TypingCommand"
+        }
+      },
+      "PingCommand": {
+        "name": "PingCommand",
+        "title": "Ping",
+        "summary": "Application-level liveness probe",
+        "payload": {
+          "$ref": "./models.json#/components/schemas/PingCommand"
         }
       }
     }

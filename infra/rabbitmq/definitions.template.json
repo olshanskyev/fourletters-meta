@@ -33,7 +33,7 @@
     {
       "user": "fourletters-server",
       "vhost": "/",
-      "configure": "^(messages\\.exchange|hub\\.queue\\..*)$",
+      "configure": "^hub\\.queue\\..*$",
       "write": "^messages\\.exchange$",
       "read": "^$"
     },
@@ -41,14 +41,33 @@
       "user": "fourletters-hub",
       "vhost": "/",
       "configure": "^$",
-      "write": "^hub\\.queue\\..*$",
-      "read": "^(messages\\.exchange|hub\\.queue\\..*)$"
+      "write": "^(hub\\.queue\\..*|presence\\.exchange)$",
+      "read": "^(messages\\.exchange|hub\\.queue\\..*|presence\\.exchange)$"
     }
   ],
   "topic_permissions": [],
   "parameters": [],
   "policies": [],
   "queues": [],
-  "exchanges": [],
+  "exchanges": [
+    {
+      "name": "messages.exchange",
+      "vhost": "/",
+      "type": "topic",
+      "durable": true,
+      "auto_delete": false,
+      "internal": false,
+      "arguments": {}
+    },
+    {
+      "name": "presence.exchange",
+      "vhost": "/",
+      "type": "topic",
+      "durable": true,
+      "auto_delete": false,
+      "internal": false,
+      "arguments": {}
+    }
+  ],
   "bindings": []
 }

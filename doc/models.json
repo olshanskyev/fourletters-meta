@@ -488,6 +488,111 @@
           }
         }
       },
+      "PresenceStatus": {
+        "type": "string",
+        "enum": ["online", "offline"],
+        "description": "Live presence of a watched contact: online/offline"
+      },
+      "PresenceEvent": {
+        "type": "object",
+        "required": ["type", "userId", "status"],
+        "description": "WS push: the current or updated online/offline state of a contact the client subscribed to via presenceSubscribe.",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["presence"]
+          },
+          "userId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The watched contact this state refers to."
+          },
+          "status": {
+            "$ref": "#/components/schemas/PresenceStatus"
+          }
+        }
+      },
+      "TypingEvent": {
+        "type": "object",
+        "required": ["type", "userId"],
+        "description": "WS push: a watched contact is currently typing.",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["typing"]
+          },
+          "userId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The contact who is typing."
+          }
+        }
+      },
+      "PresenceSubscribeCommand": {
+        "type": "object",
+        "required": ["type", "userId"],
+        "description": "Client -> Hub: start receiving a contact's online/typing state.",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["presence_subscribe"]
+          },
+          "userId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The contact to watch."
+          }
+        }
+      },
+      "PresenceUnsubscribeCommand": {
+        "type": "object",
+        "required": ["type", "userId"],
+        "description": "Client -> Hub: stop receiving a contact's state.",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["presence_unsubscribe"]
+          },
+          "userId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The contact to stop watching."
+          }
+        }
+      },
+      "TypingCommand": {
+        "type": "object",
+        "required": ["type"],
+        "description": "Client -> Hub: 'I am typing in my active chat.' The Hub derives the sender id from the authenticated session and relays it to that user's watchers.",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["typing"]
+          }
+        }
+      },
+      "PingCommand": {
+        "type": "object",
+        "required": ["type"],
+        "description": "Client -> Hub: application-level liveness probe sent after a resume; the Hub replies with a Pong.",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["ping"]
+          }
+        }
+      },
+      "PongEvent": {
+        "type": "object",
+        "required": ["type"],
+        "description": "Hub -> client: reply to a Ping, proving the socket is alive.",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["pong"]
+          }
+        }
+      },
       "GroupMember": {
         "type": "object",
         "required": ["userId"],

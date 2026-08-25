@@ -31,6 +31,17 @@ The Hub consumes with **manual ack** and acks RabbitMQ once the payload has been
 
 To illustrate the Hub's content-agnostic role: when Bob reads a message, Bob's client `POST`s a **signed `read` receipt to the Server** (HTTPS, *not* the Hub). The Server records it and **publishes `user.alice`** carrying the read event. Alice's Hub consumes `user.alice` and pushes it to Alice's WebSocket exactly like any other payload — the Hub neither generated nor understood the event.
 
+## Presence & Typing (the one place the Hub acts on inbound frames)
+
+Presence (online / typing) is the **single** exception to "receive-only": the Hub relays a live presence signal peer-to-peer over `presence.exchange`, without the Server and without storage. It stays a relay — it holds only **transient subscription-routing state** (which local client watches which contact) and **persists nothing** (no presence values, no timestamps; "last seen" is deferred, see [FUTURE_EXTENSIONS.md §15](../FUTURE_EXTENSIONS.md#15-presence--last-seen-persistence--untrusted-hub-hardening)).
+
+- **Inbound frames it now acts on:** `presence_subscribe`, `presence_unsubscribe`, `typing` (beyond the existing `ping`). The sender's id always comes from the connection's validated JWT, never from the frame.
+- **Online = routability, not a query.** `presence.exchange` is a **topic** exchange: a Hub binds `presence.{id}` for each user it *holds* and `watch.{id}` for each user a local client is *watching*. "Is X online?" is answered by a `mandatory` probe to `presence.{X}` — **routable ⇒ the owner Hub re-announces X online, returned ⇒ offline** — reusing the message offline-tripwire primitive.
+- **How it stays content-agnostic for messages:** presence and messages share the **same** `hub.queue.{hubId}`; the consumer routes by source exchange and key (`messages.exchange` → opaque message path; `presence.exchange` + `watch.{id}` → forward to local watchers; `presence.exchange` + `presence.{id}` → an inbound probe, re-announce that user online). Message handling is unchanged.
+- **On connect/disconnect** it additionally binds/unbinds `presence.{id}` and publishes an event to `watch.{id}` — the same lifecycle hooks that already bind/unbind `user.{id}` on `messages.exchange`.
+
+The full frame set, topic payloads, probe/snapshot mechanism, and security analysis live in [rabbitmq-exchange.md § Presence & Typing](rabbitmq-exchange.md#presence--typing-presenceexchange).
+
 ---
 
 ## Block Algorithm

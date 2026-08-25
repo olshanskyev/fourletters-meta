@@ -10,7 +10,7 @@ For a high-level overview of the user identification process, refer to [2.1 Auth
 - **Refresh Token:** Stored securely as an `HttpOnly` cookie.
 
 ## Edge Cases & Concurrency (ToDo)
-- **Strict Rotation & Grace Period:** Currently, strict rotation is enforced (only one active refresh token per session is valid at a time). In rare multi-tab scenarios, concurrent refresh requests might lead to a 401 Unauthorized for the slower tab, which is acceptable from a strict security standpoint. However, for a better User Experience, a short **grace period** may be implemented on the backend to temporarily accept a recently invalidated refresh token to gracefully handle concurrent multi-tab refreshes.
+- **Strict Rotation & Grace Period:** Each refresh rotates the refresh **token value** (only one is valid at a time) but **keeps the `sessionId` stable** for the session's lifetime. Keeping the id stable avoids spurious logouts when a background/resume refresh rotates the cookie but the client (suspended by iOS) never persists a new id. Concurrent multi-tab refreshes can still 401 the slower tab on the rotated token value; a short backend **grace period** for a just-rotated token remains a possible UX improvement.
 - **Database Cleanup:** Orphaned session entries (e.g., created during concurrent multi-tab refreshes or missed logouts) are not permanently leaked. A backend scheduled job automatically cleans up expired refresh tokens from the database.
 - **XSS & Session ID Manipulation:** If an attacker executes a Cross-Site Scripting (XSS) attack and alters the `sessionId` stored in local storage, the next token refresh attempt will fail. The server will reject the request due to a mismatch between the `HttpOnly` refresh token cookie and the altered `sessionId`. This causes an automatic logout (a targeted Denial of Service), but successfully prevents session hijacking, as the attacker cannot access the `HttpOnly` cookie.
 
@@ -48,7 +48,7 @@ flowchart TD
     %% Server Container Nodes
     subgraph Server [Server Container]
         BE_Check{Find refresh token<br/>by token & sessionId?}
-        BE_Success[Generate new sessionId<br/>Set jti = sessionId in JWTs]
+        BE_Success[Rotate refresh token value<br/>Reuse existing sessionId as jti]
         BE_ReturnSuccess[Return AuthResponse<br/>Cookie: refresh_token]
         BE_ReturnFail[Return 401 Unauthorized<br/>Set cookie to remove refresh_token]
 
