@@ -1,12 +1,12 @@
 # Hub WebSocket Handler Logic
 
-This document maps out the execution logic inside the `HubWebSocketHandler`. In the fourletters architecture the Hub is a **receive-only live relay**: it pushes already-accepted, E2E-encrypted payloads from RabbitMQ to the recipient's WebSocket. It never accepts message sends, never owns durability, and never inspects or transforms payloads.
+This document maps out the execution logic inside the `HubWebSocketHandler`. In the fourletters architecture the Hub is a **live relay**: it pushes already-accepted, E2E-encrypted payloads from RabbitMQ to the recipient's WebSocket, and relays a small set of ephemeral control frames (presence, typing, call signaling). It never accepts message sends, never owns durability, and never inspects or transforms payloads.
 
 For the surrounding context see [2.4 Message Sending & Receiving](../ARCHITECTURE.md#24-message-sending--receiving-server-owned-inbox) and [2.5 Delivery Guarantee](../ARCHITECTURE.md#25-delivery-guarantee-server-retained-copy--signed-receipt) in the architecture document, and the [RabbitMQ topology](rabbitmq-exchange.md) for object ownership.
 
 ## Core Responsibilities
 1. **Registration:** on boot the Hub authenticates to the Server and receives its queue name `hub.queue.{hubId}`, then begins consuming. The Hub has **no permission to declare queues** — the Server provisions the queue (see [RabbitMQ topology](rabbitmq-exchange.md#object-ownership--lifecycle)).
-2. **Connection authorization & presence:** on a client WebSocket connect, the Hub validates the client's **Access JWT** (the short-lived access token, verified cryptographically via the Server's JWKS — no DB lookup) and then **binds `user.{id}`** to its queue. On disconnect it **unbinds**. A binding therefore *is* live presence.
+2. **Connection authorization & presence:** on a client WebSocket connect, the Hub validates the client's **Access JWT** (the short-lived access token, verified cryptographically via the Server's JWKS — no DB lookup) and then **binds `user.{id}`** (and `presence.{id}`, `call.{id}`) to its queue. On disconnect it **unbinds**. A binding therefore *is* live presence.
 3. **Live relay:** the Hub consumes a payload from its queue, looks up the local WebSocket session for the target user, and pushes the **opaque** payload over the socket.
 
 ## What the Hub does NOT do
@@ -15,7 +15,7 @@ The Hub is intentionally a dumb pipe. The following responsibilities live elsewh
 
 - **It does not accept `sendMessage`.** Clients send by `POST`ing to the **Server** over HTTPS; sending never transits a Hub.
 - **It does not handle delivery/read receipts.** The recipient sends **signed** receipts **directly to the Server** over HTTPS, out of band from the Hub.
-- **It does not inject `senderId` or guard against spoofing.** Sender identity is bound by the **Server** at send time, and payloads are **signed end-to-end** by the sender's identity key (verified by the recipient against the key directory).
+- **It does not inject `senderId` into messages or guard against spoofing.** Sender identity of a message is bound by the **Server** at send time, and payloads are **signed end-to-end** by the sender's identity key (verified by the recipient against the key directory). For its own ephemeral frames (typing, call signals) the Hub stamps the sender from the validated JWT.
 - **It does not transform actions into events.** Payloads are opaque; any event semantics (e.g. a "read" notification) are produced by the **Server** before it publishes.
 - **It does not provide durability.** RabbitMQ is non-durable live fan-out. A missed live delivery is recovered by the Server's `GET /api/inbox` sync — there is **no 10s ACK timer and no store-and-forward**.
 
@@ -31,9 +31,9 @@ The Hub consumes with **manual ack** and acks RabbitMQ once the payload has been
 
 To illustrate the Hub's content-agnostic role: when Bob reads a message, Bob's client `POST`s a **signed `read` receipt to the Server** (HTTPS, *not* the Hub). The Server records it and **publishes `user.alice`** carrying the read event. Alice's Hub consumes `user.alice` and pushes it to Alice's WebSocket exactly like any other payload — the Hub neither generated nor understood the event.
 
-## Presence & Typing (the one place the Hub acts on inbound frames)
+## Presence & Typing (inbound frames)
 
-Presence (online / typing) is the **single** exception to "receive-only": the Hub relays a live presence signal peer-to-peer over `presence.exchange`, without the Server and without storage. It stays a relay — it holds only **transient subscription-routing state** (which local client watches which contact) and **persists nothing** (no presence values, no timestamps; "last seen" is deferred, see [FUTURE_EXTENSIONS.md §15](../FUTURE_EXTENSIONS.md#15-presence--last-seen-persistence--untrusted-hub-hardening)).
+Presence (online / typing) is one of the two exceptions to "receive-only" (the other is [call signaling](#call-signaling-inbound-frames)): the Hub relays a live presence signal peer-to-peer over `presence.exchange`, without the Server and without storage. It stays a relay — it holds only **transient subscription-routing state** (which local client watches which contact) and **persists nothing** (no presence values, no timestamps; "last seen" is deferred, see [FUTURE_EXTENSIONS.md §15](../FUTURE_EXTENSIONS.md#15-presence--last-seen-persistence--untrusted-hub-hardening)).
 
 - **Inbound frames it now acts on:** `presence_subscribe`, `presence_unsubscribe`, `typing` (beyond the existing `ping`). The sender's id always comes from the connection's validated JWT, never from the frame.
 - **Online = routability, not a query.** `presence.exchange` is a **topic** exchange: a Hub binds `presence.{id}` for each user it *holds* and `watch.{id}` for each user a local client is *watching*. "Is X online?" is answered by a `mandatory` probe to `presence.{X}` — **routable ⇒ the owner Hub re-announces X online, returned ⇒ offline** — reusing the message offline-tripwire primitive.
@@ -41,6 +41,17 @@ Presence (online / typing) is the **single** exception to "receive-only": the Hu
 - **On connect/disconnect** it additionally binds/unbinds `presence.{id}` and publishes an event to `watch.{id}` — the same lifecycle hooks that already bind/unbind `user.{id}` on `messages.exchange`.
 
 The full frame set, topic payloads, probe/snapshot mechanism, and security analysis live in [rabbitmq-exchange.md § Presence & Typing](rabbitmq-exchange.md#presence--typing-presenceexchange).
+
+## Call Signaling (inbound frames)
+
+After a call offer has arrived over the normal message path, every further call signal (`ringing`, `answer`, `ice`, `hangup`, `decline`, `busy`) travels as a `call_signal` frame through the Hubs over `calls.exchange` (see [ARCHITECTURE.md §2.9](../ARCHITECTURE.md#29-11-audiovideo-calls-webrtc)). The Hub stays a blind relay: the payload is E2E-encrypted over the pairwise Double Ratchet, and nothing is stored.
+
+- **Inbound frame:** `{ "type": "call_signal", "recipientId": "Y", "payload": "..." }`. The Hub validates the recipient id and rejects payloads over **64 KiB**.
+- **Publish:** the Hub builds `{ "type": "call_signal", "senderId": "<from JWT>", "payload": "..." }` and publishes it to `calls.exchange` with routing key `call.{Y}` — non-persistent, 30 s expiry. An unroutable signal (Y not connected) is dropped.
+- **Consume:** a delivery from `calls.exchange` with key `call.{X}` is forwarded verbatim to X's local session, then acked (ack-and-drop when X has no local session).
+- **On connect/disconnect** the Hub binds/unbinds `call.{id}` together with `user.{id}`.
+
+Topology, permissions and the security analysis live in [rabbitmq-exchange.md § Call Signaling](rabbitmq-exchange.md#call-signaling-callsexchange).
 
 ---
 
@@ -61,9 +72,9 @@ flowchart TD
         L1[Client opens WebSocket]
         L2{Validate JWT via JWKS}
         LX[Reject and close WS]
-        L3[Bind user.id to hub queue]
+        L3[Bind user.id, presence.id, call.id to hub queue]
         L4[Register local session: id to WS]
-        L5[On disconnect: unbind user.id and drop session]
+        L5[On disconnect: unbind user.id, presence.id, call.id and drop session]
     end
 
     subgraph Relay [Live relay path]

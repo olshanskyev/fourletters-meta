@@ -22,6 +22,7 @@ A malicious Hub is assumed to be able to attempt any of the following:
 | **Spoof an outgoing message** (`senderId`) | Sending never goes through a Hub — it goes to the Server. Additionally, message payloads are protected by the **Double Ratchet** (which authenticates them end-to-end) and receipts are **signed by the recipient's identity key**, so a relay cannot forge or alter them. |
 | **Silently drop / withhold messages** (consume-and-ack, never forward) | The Server is the durable owner and re-publishes until it receives a **signed delivery receipt**. The recipient detects withholding via an **independent reference** (Server inbox state + push tripwire) and **switches Hubs**. See [3](#3-malicious-hub-detection--recovery). |
 | **Over-delegation** (reuse a user's token elsewhere) | The client presents only a **narrowly scoped, short-lived transport token** (`aud=mq`, scoped to its own `user.<id>`) to the Hub/live layer — never the full-power access JWT. |
+| **Drop, delay or forge call signaling** (`call_signal`) | Signals are E2E-encrypted over the Double Ratchet, so a Hub cannot read them, and a forged `senderId` fails to decrypt under that sender's session and is discarded. The DTLS fingerprints inside the SDP are authenticated the same way, so a Hub cannot insert itself into the media path. Dropping signals only makes a call fail to connect — a bounded, visible nuisance. |
 
 **Core principle:** *the component that performs an action is never trusted to authorize it.* Delivery durability lives in the Server; route authorization lives in the broker/Server; content and authenticity live in client-side cryptography. A Hub is only ever a blind, replaceable pipe for live delivery.
 
@@ -297,6 +298,36 @@ All three live **inside the E2E envelope**, so they need no Hub cooperation and 
 4. **Render** with a presentational `LinkPreviewComponent` (a Material card) shown under the bubble. Every recipient renders it with **zero network calls**, because the sender already did the fetch.
 
 **Trade-off the sender accepts:** only the *sender* touches the link (the Server sees the URL during unfurl, but not the conversation, and never the recipients). The sender may opt out per-message (e.g. a toggle) to avoid unfurling sensitive links. This confines the single unavoidable fetch to the one party that already has the link, and keeps recipients — the parties whose metadata most needs protecting — completely passive.
+
+---
+
+## 14. TURN Relay for Calls
+
+**Phase 1 (implemented):** 1:1 calls are pure peer-to-peer. A self-hosted **coturn in STUN-only mode** tells each browser its public address, and the peers punch a direct UDP path (see [ARCHITECTURE.md §2.9](ARCHITECTURE.md#29-11-audiovideo-calls-webrtc)). No server ever carries media. The client already receives its ICE servers as a **list** from runtime config and reports a distinct "could not connect" outcome when ICE fails.
+
+**The gap:** a direct path cannot be established when either peer sits behind a **symmetric NAT**, **carrier-grade NAT** (common on mobile networks), or a **firewall that blocks UDP** (corporate / hotel / public Wi-Fi). Typically 10–20% of calls are affected. The Phase 1 "could not connect" rate is the signal for when this extension becomes necessary.
+
+**Deferred: TURN relay fallback.** TURN lets a peer that cannot reach the other directly send its media to a relay address on our server, which forwards it to the other peer. ICE still prefers direct candidates and uses the relay only as a last resort.
+
+**Media stays end-to-end encrypted.** The relay forwards **already-encrypted DTLS-SRTP packets**. The media keys are negotiated by DTLS directly between the two browsers, and the DTLS fingerprints are authenticated through the Double Ratchet, so the relay can neither decrypt nor man-in-the-middle the call. It does see metadata: both peers' IP addresses, timing and traffic volume.
+
+**Server side — short-lived credentials (TURN REST scheme).** An open relay would be abused for arbitrary traffic, so every allocation must be authenticated without giving clients a long-lived secret:
+
+1. coturn and the Server share a secret `TURN_SECRET` (coturn `--use-auth-secret --static-auth-secret=...`); it never reaches a client.
+2. A new authenticated endpoint `GET /calls/turn-credentials` returns `{ urls, username, credential, expiresAt }` with `username = "<expiryUnix>:<userId>"` and `credential = base64(HMAC-SHA1(TURN_SECRET, username))`, valid for a short TTL (e.g. 1 h).
+3. coturn validates the HMAC and the expiry itself — **no database, no Server call per allocation**.
+
+**Client side.** The ICE-server provider fetches the credentials right before each call and appends the TURN entries to the existing STUN list; `iceTransportPolicy` stays `all`. No signaling or protocol change.
+
+**Deployment.** The existing coturn container switches from `--stun-only` to relay mode:
+
+*   **Relay port range** (e.g. `--min-port=49160 --max-port=49200`), opened in the firewall. Prefer `network_mode: host`: publishing a large UDP range through Docker's port mapping is slow and adds an extra NAT hop. If the host is itself behind NAT, set `--external-ip`.
+*   **Abuse protection:** `--denied-peer-ip` for private, loopback and link-local ranges (so the relay cannot be used to reach the internal network, an SSRF-like risk), `--no-multicast-peers`, per-user and total quotas, and a bandwidth cap.
+*   **Optional `turns:` on TCP/TLS 443** for networks that block everything except HTTPS. This requires a certificate and must not collide with nginx on 443 (a separate IP or SNI-based routing).
+
+**Optional privacy mode — relay-only calls.** A user setting can force `iceTransportPolicy: 'relay'`, so the peers never learn each other's IP address, at the cost of relay bandwidth and slightly higher latency (the model Signal uses for calls from non-contacts).
+
+**Cost.** Every relayed call consumes server bandwidth in both directions (roughly 1–2.5 Mbit/s per direction for video, about 50–100 kbit/s for audio). Relaying should be monitored (coturn exposes allocation counts and traffic) and capped. TURN is core infrastructure; it is never delegated to volunteer Hubs.
 
 **Forward-compatibility.** Because the preview rides **inside the E2E envelope**, adding it later needs no change to the send path, the inbox, or the message wire schema the Server sees — only a new content field, the `/unfurl` endpoint, and the card component. This mirrors the "everything new lives inside the encrypted envelope" principle used throughout this document.
 

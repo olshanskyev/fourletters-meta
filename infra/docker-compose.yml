@@ -126,7 +126,7 @@ services:
     container_name: fourletters-gui
     environment:
       # Names substituted into the __VAR__ placeholders inside the built app + nginx config.
-      - SUBSTITUTE_VARS=BASE_URL_SERVER BASE_URL_HUB VK_APP_ID GOOGLE_CLIENT_ID OAUTH_REDIRECT_URL UMAMI_WEBSITE_ID PUSH_VAPID_PUBLIC_KEY HOST CERT_PATH
+      - SUBSTITUTE_VARS=BASE_URL_SERVER BASE_URL_HUB VK_APP_ID GOOGLE_CLIENT_ID OAUTH_REDIRECT_URL UMAMI_WEBSITE_ID PUSH_VAPID_PUBLIC_KEY HOST CERT_PATH STUN_URLS
       - BASE_URL_SERVER=${BASE_URL_SERVER}
       - BASE_URL_HUB=${BASE_URL_HUB}
       - VK_APP_ID=${VK_APP_ID:-0}
@@ -136,6 +136,8 @@ services:
       - PUSH_VAPID_PUBLIC_KEY=${PUSH_VAPID_PUBLIC_KEY:-}
       - HOST=${HOST:-localhost}
       - CERT_PATH=${CERT_PATH:-}
+      # Comma-separated ICE server URLs handed to the PWA for calls.
+      - STUN_URLS=${STUN_URLS:-stun:${HOST:-localhost}:3478}
     ports:
       - "80:80"
       - "443:443"
@@ -147,6 +149,33 @@ services:
       - hub
     networks:
       - fourletters-net
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    restart: unless-stopped
+
+  coturn:
+    image: coturn/coturn:4.7
+    container_name: fourletters-coturn
+    # STUN only: answers "what is my public address?" for call setup; never relays media.
+    command:
+      - -n
+      - --stun-only
+      - --listening-port=3478
+      - --fingerprint
+      - --no-cli
+      - --no-tls
+      - --no-dtls
+      - --no-software-attribute
+      - --log-file=stdout
+      - --simple-log
+      - --realm=${HOST:-localhost}
+    # Published directly (not via nginx): STUN must see the client's real source address.
+    ports:
+      - "3478:3478/udp"
+      - "3478:3478/tcp"
     logging:
       driver: json-file
       options:

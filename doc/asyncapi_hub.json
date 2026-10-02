@@ -3,7 +3,7 @@
   "info": {
     "title": "Fourletters API - Hub (WebSocket)",
     "version": "1.0.0",
-    "description": "Hub is a receive-only live relay. Clients open a WebSocket to receive already-accepted, E2E-encrypted payloads pushed by the Server via RabbitMQ."
+    "description": "Hub is a live relay. Clients open a WebSocket to receive already-accepted, E2E-encrypted payloads pushed by the Server via RabbitMQ, and to exchange ephemeral control frames (presence, typing, call signaling). Messages are never sent through the Hub."
   },
   "servers": {
     "hub": {
@@ -19,7 +19,7 @@
   },
   "channels": {
     "/ws": {
-      "description": "Receive-only WebSocket channel for the fourletters Hub. The client authenticates with its Access JWT",
+      "description": "WebSocket channel for the fourletters Hub. The client authenticates with its Access JWT",
       "bindings": {
         "ws": {
           "query": {
@@ -35,7 +35,7 @@
       },
       "subscribe": {
         "summary": "Client receives a live payload from the Hub",
-        "description": "Relays a live payload to the client: a new message or a delivery/read/undecryptable notification.",
+        "description": "Relays a live payload to the client: a new message, a delivery/read/undecryptable notification, a contact's presence/typing state, a pong, or a call signal from a call peer.",
         "operationId": "receiveFromHub",
         "message": {
           "oneOf": [
@@ -43,20 +43,22 @@
             { "$ref": "#/components/messages/ReceiptEvent" },
             { "$ref": "#/components/messages/PresenceEvent" },
             { "$ref": "#/components/messages/TypingEvent" },
-            { "$ref": "#/components/messages/PongEvent" }
+            { "$ref": "#/components/messages/PongEvent" },
+            { "$ref": "#/components/messages/CallSignalEvent" }
           ]
         }
       },
       "publish": {
         "summary": "Client sends a control frame to the Hub",
-        "description": "The Hub is otherwise receive-only; these are the only frames it acts on. Presence subscribe/unsubscribe manage which contacts' live state the client receives; typing announces the sender is typing; ping is an application-level liveness probe answered by a pong.",
+        "description": "These are the only frames the Hub acts on. Presence subscribe/unsubscribe manage which contacts' live state the client receives; typing announces the sender is typing; ping is an application-level liveness probe answered by a pong; call_signal relays an ephemeral, E2E-encrypted call signal to a call peer (never stored).",
         "operationId": "sendToHub",
         "message": {
           "oneOf": [
             { "$ref": "#/components/messages/PresenceSubscribeCommand" },
             { "$ref": "#/components/messages/PresenceUnsubscribeCommand" },
             { "$ref": "#/components/messages/TypingCommand" },
-            { "$ref": "#/components/messages/PingCommand" }
+            { "$ref": "#/components/messages/PingCommand" },
+            { "$ref": "#/components/messages/CallSignalCommand" }
           ]
         }
       }
@@ -141,6 +143,22 @@
         "summary": "Application-level liveness probe",
         "payload": {
           "$ref": "./models.json#/components/schemas/PingCommand"
+        }
+      },
+      "CallSignalCommand": {
+        "name": "CallSignalCommand",
+        "title": "Call Signal (send)",
+        "summary": "Send an ephemeral, E2E-encrypted call signal to a call peer",
+        "payload": {
+          "$ref": "./models.json#/components/schemas/CallSignalCommand"
+        }
+      },
+      "CallSignalEvent": {
+        "name": "CallSignalEvent",
+        "title": "Call Signal (receive)",
+        "summary": "An ephemeral, E2E-encrypted call signal from a call peer",
+        "payload": {
+          "$ref": "./models.json#/components/schemas/CallSignalEvent"
         }
       }
     }

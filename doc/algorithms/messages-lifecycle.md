@@ -22,7 +22,7 @@ For the high-level model see [2.4 Message Sending & Receiving](../ARCHITECTURE.m
 | `POST /messages/batch` | `acceptAll` | Same as `accept` per item (idempotent by `messageId`); used by client resync |
 | `GET /inbox` | `getInbox` | Return **hot ∪ cold** messages (as recipient) **+ drained pending receipts** (as sender) |
 | `POST /receipts` | `recordReceipt` | Drop the retained copy, **record the ack**, and relay it live to the sender |
-| *(scheduled)* | `flushExpired` | Persist-then-evict messages whose hold window elapsed, then **push-wake** each still-pending recipient (cold-tier backstop) |
+| *(scheduled)* | `flushExpired` | Every `inbox.flush-interval-ms`: **push-wake** each recipient still pending after the push backstop delay (once per message), then persist-then-evict messages whose hold window elapsed |
 
 ## Control-flow block diagram
 
@@ -58,7 +58,7 @@ flowchart TD
 
     Flush -->|"claim + persist (1 write)"| Cold
     Flush -->|then evict| Hot
-    Flush -.->|"unacked recipients: wake"| Push
+    Flush -.->|"unacked after push backstop delay: wake (once)"| Push
 
     Rec -->|"drop copy (hot or cold)"| Hot
     Rec -->|"delete row if flushed"| Cold
@@ -80,6 +80,7 @@ stateDiagram-v2
     [*] --> HotTier: accept() — store + publish live
 
     HotTier --> Dropped: receipt within hold window<br/>(0 DB writes)
+    HotTier --> HotTier: push backstop delay elapses, no receipt<br/>push wake-up (once)
     HotTier --> ColdTier: hold window elapses<br/>flushExpired: persist (1 write) then evict
 
     ColdTier --> Dropped: receipt — delete row
@@ -89,7 +90,7 @@ stateDiagram-v2
 ```
 
 - **Confirmed fast (both online):** `HotTier → Dropped`, **zero** DB writes.
-- **Recipient offline:** `HotTier → ColdTier` (one write), delivered later via `GET /inbox`, then `ColdTier → Dropped` on the signed receipt. The message is published **`mandatory`**, so the broker returns it as unroutable the instant the recipient has no live binding — that return fires a **Web Push** notification (see [Push notifications](#push-notifications)) while the copy is still in the hot tier, preserving the zero-write fast path. If the recipient's Hub binding is a **zombie** (an OS-suspended mobile tab whose socket died silently, so the live publish routes to a queue that is briefly still bound), the accept-time return never fires; the **flush-time backstop** (below) wakes the recipient instead when the copy reaches the cold tier.
+- **Recipient offline:** `HotTier → ColdTier` (one write), delivered later via `GET /inbox`, then `ColdTier → Dropped` on the signed receipt. The message is published **`mandatory`**, so the broker returns it as unroutable the instant the recipient has no live binding — that return fires a **Web Push** notification (see [Push notifications](#push-notifications)) while the copy is still in the hot tier, preserving the zero-write fast path. If the recipient's Hub binding is a **zombie** (an OS-suspended mobile tab whose socket died silently, so the live publish routes to a queue that is briefly still bound), the accept-time return never fires; the **push backstop** (below) wakes the recipient instead once the copy has gone unacknowledged for the push backstop delay.
 - A message in transit during flush is briefly in **both** tiers (harmless duplicate, de-duped by `messageId`) and **never in neither** (persist-then-evict).
 
 ## Receipt path (delivered / read / undecryptable)
@@ -132,15 +133,17 @@ An `undecryptable` receipt travels the **same `recordReceipt` path** — drop th
 Because messages are published **`mandatory`**, the broker returns any envelope it cannot route to a live consumer. A background **Web Push** wake-up is fired from **two** places, deduplicated per `(messageId, recipientId)` so a message never pushes twice:
 
 1. **Accept-time (fast path):** an unroutable return means the recipient has **no Hub binding** at all — the app is not connected — so the push fires within milliseconds, while the retained copy is still in the hot tier.
-2. **Flush-time (backstop):** when a copy reaches the **cold tier** it went unacknowledged for the whole hold window. That covers the case a live publish *did* route — to a **zombie Hub binding** — but was never delivered: an OS-suspended mobile tab (notably iOS) whose socket died silently while its auto-delete queue lingers until the Hub's heartbeat evicts it. No unroutable return fires in that window, so without this backstop the recipient would get nothing until their next `GET /inbox`.
+2. **Backstop (hot tier):** the scheduled sweeper pushes each recipient that is still pending once the copy is older than the **push backstop delay** — `push.backstop-delay-seconds` (default 10 s) for chat messages and `push.call-backstop-delay-seconds` (default 5 s) for call offers (`hint: call`). An online client acknowledges within about a second, so a missing receipt after the delay means the live publish *did* route — to a **zombie Hub binding** — but was never delivered: an OS-suspended mobile tab (notably iOS) whose socket died silently while its auto-delete queue lingers until the Hub's heartbeat evicts it. No unroutable return fires in that window, so without this backstop the recipient would get nothing until their next `GET /inbox`.
+
+The push backstop delay is independent of the hold window, which only trades memory for DB writes. It must not exceed the hold window (validated at startup), so the backstop always fires while the copy is in the hot tier; the flush itself sends no push. The sweeper runs every `inbox.flush-interval-ms` (default 1 s) so both deadlines fire on time; it only walks the in-memory map.
 
 ```mermaid
 flowchart TD
     Acc([accept: store copy + publish message, mandatory]) --> Route{Recipient bound?<br/>live Hub consumer}
-    Route -- "Yes (routed)" --> Zombie{Acked within<br/>hold window?}
+    Route -- "Yes (routed)" --> Zombie{Acked within<br/>push backstop delay?}
     Route -- "No (returned unroutable)" --> Notify["ReturnsCallback → notifyRecipient (accept-time)"]
     Zombie -- "Yes" --> Live["delivered live via Hub → receipt clears copy"]
-    Zombie -- "No (zombie binding)" --> FlushN["flushExpired → notifyRecipient (flush-time backstop)"]
+    Zombie -- "No (zombie binding)" --> BackN["sweeper → notifyRecipient (backstop)"]
 
     subgraph VAPID ["Web Push (VAPID) — PushNotificationService"]
         Dedup{New push for<br/>this messageId+recipient?}
@@ -162,13 +165,14 @@ flowchart TD
     end
 
     Notify --> Dedup
-    FlushN --> Dedup
+    BackN --> Dedup
 ```
 
 - **Trigger, not content:** the push payload carries only `senderId` / `groupId` (identity the Server already knows) plus a generic body — **never** E2E message content. The client resolves the local conversation on click and navigates to it.
 - **Fast path preserved:** the accept-time notification fires from the `ReturnsCallback` while the copy is still in the **hot tier**, so a normal offline delivery still costs a single DB write at flush time and nothing extra here.
-- **Two triggers, deduped per message:** a `(messageId, recipientId)` marker collapses the accept-time and flush-time pushes for the same message into one, so a genuinely-offline recipient (woken at accept) is not pushed again at flush. The marker's lifetime equals the message's **hot-tier residency**: it is cleared on whichever exit ends that residency — a **receipt** (recipient read/acked the copy) or the **flush** to cold — so the marker set stays bounded to messages currently held, needing no TTL or scheduled cleanup.
-- **Flush-time cost:** the backstop can push a recipient who was reachable but simply had not acked within the hold window; this is a rare false wake-up the client dampens (it suppresses a notification for an already-open conversation), accepted as the cost of covering silently-dropped Hub bindings.
-- **Debounced per recipient:** rapid bursts to the same offline recipient collapse into one notification within a short window (`push.debounce-seconds`), so a chatty sender does not fan out a storm of notifications.
+- **Two triggers, deduped per message:** a `(messageId, recipientId)` marker collapses the accept-time and backstop pushes for the same message into one, so a genuinely-offline recipient (woken at accept) is not pushed again by the backstop. The marker's lifetime equals the message's **hot-tier residency**: it is cleared on whichever exit ends that residency — a **receipt** (recipient read/acked the copy) or the **flush** to cold — so the marker set stays bounded to messages currently held, needing no TTL or scheduled cleanup.
+- **Backstop cost:** the backstop can push a recipient who is reachable but has not acknowledged within the delay (e.g. a large image on a slow link, or a long inbox-sync batch); this is a rare false wake-up the client dampens (it suppresses a notification for an already-open conversation), accepted as the cost of waking silently-dropped Hub bindings within seconds. Call offers are tiny and acknowledged immediately, so they use the shorter delay.
+- **Debounced per recipient:** rapid bursts to the same offline recipient collapse into one notification within a short window (`push.debounce-seconds`), so a chatty sender does not fan out a storm of notifications. Call offers bypass the debounce.
+- **Call offers (`hint: call`):** the push reads "Incoming call from X", uses its own notification tag (it never merges with message notifications), high urgency, and a Web Push TTL equal to the offer TTL (60 s), so a device that comes online later is never shown a stale incoming call.
 - **Single device:** one subscription per user (`push_subscriptions` keyed by `user_id`, upserted on `POST /push/subscribe`). A stale endpoint returning `404`/`410` is pruned on send; a new login on another device replaces the row.
 
