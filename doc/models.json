@@ -13,6 +13,11 @@
         "enum": ["delivered", "read", "undecryptable"],
         "description": "'delivered' = the recipient device received and decrypted the message; 'read' = the user opened it; 'undecryptable' = the recipient received it but could not decrypt it (the message was encrypted to a stale public key, e.g. after the recipient logged in on a new device). A negative acknowledgement: it lets the Server drop the retained copy (no one can decrypt it) and prompts the original sender to re-fetch the recipient's current key and resend once."
       },
+      "MessageHint": {
+        "type": "string",
+        "enum": ["message", "call"],
+        "description": "Plaintext delivery hint set by the sender. The Server uses it only to choose the push notification wording and timing: 'message' = a chat message (default when omitted); 'call' = a call offer."
+      },
       "RefreshError": {
         "type": "object",
         "required": ["reason"],
@@ -146,6 +151,9 @@
             "type": "string",
             "format": "uuid",
             "description": "Present only for group messages."
+          },
+          "hint": {
+            "$ref": "#/components/schemas/MessageHint"
           }
         }
       },
@@ -590,6 +598,47 @@
           "type": {
             "type": "string",
             "enum": ["pong"]
+          }
+        }
+      },
+      "CallSignalCommand": {
+        "type": "object",
+        "required": ["type", "recipientId", "payload"],
+        "description": "Client -> Hub: an ephemeral call signal (ringing, answer, ICE candidates, hangup, decline, busy) for a 1:1 call.",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["call_signal"]
+          },
+          "recipientId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The call peer this signal is addressed to."
+          },
+          "payload": {
+            "type": "string",
+            "maxLength": 65536,
+            "description": "E2E encrypted call signal over the pairwise Double Ratchet. Format '<sessionType>.<bodyBase64>', as for a 1:1 EncryptedMessage payload."
+          }
+        }
+      },
+      "CallSignalEvent": {
+        "type": "object",
+        "required": ["type", "senderId", "payload"],
+        "description": "Hub -> client: an ephemeral call signal from a call peer.",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["call_signal"]
+          },
+          "senderId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The call peer that sent the signal, stamped by the sender's Hub from its authenticated session."
+          },
+          "payload": {
+            "type": "string",
+            "description": "E2E encrypted call signal, relayed unaltered from the CallSignalCommand."
           }
         }
       },

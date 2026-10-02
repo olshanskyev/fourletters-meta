@@ -10,7 +10,7 @@ The system consists of a frontend Progressive Web App (PWA), a **Server** that o
 
 A defining principle of the architecture is an **asymmetric message path**:
 
-*   **Sending is durable:** the PWA submits every outgoing message over HTTPS to the **Server**, which is the sole authority for accepting and durably owning a message. Clients never send through a Hub.
+*   **Sending is durable:** the PWA submits every outgoing message over HTTPS to the **Server**, which is the sole authority for accepting and durably owning a message. Clients never send messages through a Hub; the Hub only accepts ephemeral control frames (presence, typing, call signaling) that carry no durable content.
 *   **Receiving is best-effort:** a Hub only pushes already-accepted messages to recipients that are online *right now*. A Hub is a disposable relay and is never responsible for durability.
 
 ```mermaid
@@ -22,20 +22,25 @@ flowchart TD
     MQ[[RabbitMQ<br/>live fan-out]]
     PushService[Web Push<br/>VAPID]
     OAuth[VK / Google OAuth API]
+    STUN["coturn<br/>(STUN only)"]
+    Peer["Peer PWA"]
 
     Client -->|HTTPS Auth/Keys| Server
     Client -->|HTTPS Send message| Server
     Client -->|HTTPS GET /inbox sync| Server
-    Client -->|WebSocket receive live| Hub
+    Client -->|WebSocket receive live<br/>+ call_signal| Hub
     Client -->|Signed delivery receipt| Server
     Client -->|Request Token| OAuth
     Server -->|Verify Token| OAuth
     Server -->|Read/Write inbox| DB
     Server -->|Publish user.recipient| MQ
     MQ -->|Live fan-out| Hub
+    Hub -->|Publish call.recipient| MQ
     Hub -->|Fetch Key config via JWKS| Server
     Server -->|Trigger Push| PushService
     PushService -->|Wake up / Notify| Client
+    Client -->|UDP binding request| STUN
+    Client <-->|P2P call media<br/>DTLS-SRTP| Peer
 ```
 
 ### Components
@@ -43,7 +48,8 @@ flowchart TD
 *   **Server (Spring Boot):** The control plane **and the trusted owner of the message inbox**. Handles OAuth linking, validates identity, manages the public-key directory, accepts outgoing messages, holds them durably until a signed receipt arrives, publishes them to RabbitMQ for live delivery, exposes the `/inbox` sync API, and triggers push notifications. The Server is the only component trusted for delivery (never for content — payloads are E2E encrypted).
 *   **Hub (Lightweight Spring Boot):** The **live delivery relay**. It holds the long-lived WebSocket connections of online users and forwards already-accepted, E2E-encrypted payloads from RabbitMQ to the recipient. It evaluates stateless JWTs (fetching the Server's public keys via the JWKS endpoint) only to authorize *which user's* live stream a connection may receive. It has **no database access** and holds no durable state — the delivery guarantee never depends on it. In Phase 1 the Hub runs in the trusted environment alongside the Server; it is nonetheless built as a blind, replaceable relay so that untrusted third-party ("volunteer") Hubs can be enabled later without a redesign (see [FUTURE_EXTENSIONS.md](FUTURE_EXTENSIONS.md)).
 *   **PostgreSQL:** Stores user accounts, OAuth linking, Signal pre-key bundles, and the **durable inbox** (cold tier) of accepted-but-not-yet-confirmed messages.
-*   **RabbitMQ:** A **non-durable live fan-out bus**. It routes accepted payloads to whichever Hub a recipient is currently connected to. It is explicitly *not* a durability mechanism — losing a message in RabbitMQ is harmless because the Server retains the source of truth.
+*   **RabbitMQ:** A **non-durable live fan-out bus**. It routes accepted payloads to whichever Hub a recipient is currently connected to. It is explicitly *not* a durability mechanism — losing a message in RabbitMQ is harmless because the Server retains the source of truth. It also carries ephemeral call signaling between Hubs on a dedicated `calls.exchange` (see [2.9](#29-11-audiovideo-calls-webrtc)).
+*   **coturn (STUN only):** A self-hosted STUN server that tells a browser its public address so two peers can open a direct media path for a call. It handles one tiny request per call and **never carries media**; running it ourselves keeps user IPs away from third-party STUN operators. Relay (TURN) mode is deferred — see [FUTURE_EXTENSIONS.md §14](FUTURE_EXTENSIONS.md#14-turn-relay-for-calls).
 
 ---
 
@@ -126,6 +132,8 @@ The delivery model separates the **send path** (trusted, durable) from the **rec
 2. Bob's device decrypts it and returns a **signed delivery receipt** (`delivered`) to the Server.
 3. On the signed receipt, the Server **drops its retained copy** and relays the receipt to Alice, who clears her outbox. If both users are online this completes with **zero database writes**.
 
+**If no signed receipt arrives within the push backstop delay** (a few seconds — an online client acknowledges within about one), Bob's live binding may be a **zombie** (an OS-suspended mobile tab whose socket died silently), so the Server sends a **Web Push** wake-up once per message. The delay is independent of the hold window and never longer than it.
+
 **If no signed receipt arrives within the hold window** (Bob is offline *or* a malicious Hub is withholding — the two are indistinguishable and need not be told apart), the Server performs a **single write** of the message to the durable **PostgreSQL inbox** (cold tier) and stops holding it in memory. Bob receives it later via live re-publish or via the `/inbox` sync API.
 
 ```mermaid
@@ -154,6 +162,11 @@ sequenceDiagram
         Server->>Push: Notify Bob now (sender identity only, debounced)
     end
 
+    Note over Server,Push: Push backstop (zombie binding)
+    opt No signed receipt within push backstop delay
+        Server->>Push: Notify Bob (once per message, debounced)
+    end
+
     Note over Server,DB: Hold-window resolution (later)
     alt Signed receipt within hold window
         Bob->>Bob: Decrypt
@@ -171,7 +184,7 @@ sequenceDiagram
 
 The delivery guarantee does **not** rest on RabbitMQ (a relay may consume a message without ever forwarding it, and a recipient may simply be offline). Instead it rests on the **Server's retained copy plus an end-to-end signed receipt**:
 
-*   The Server **publishes `user.bob` once** as a best-effort live attempt and keeps the copy (hot tier, then DB). The publish is **`mandatory`**, so if Bob has no live binding the broker returns the envelope and the Server fires a **Web Push** notification (sender identity only, never ciphertext) to wake Bob's app — see [messages-lifecycle.md § Push notifications](algorithms/messages-lifecycle.md#push-notifications). If a **signed** `delivered` receipt arrives, the Server drops the copy. If none arrives within the hold window, it does **not** re-publish — the copy simply flushes to the DB and waits.
+*   The Server **publishes `user.bob` once** as a best-effort live attempt and keeps the copy (hot tier, then DB). The publish is **`mandatory`**, so if Bob has no live binding the broker returns the envelope and the Server fires a **Web Push** notification (sender identity only, never ciphertext) to wake Bob's app — see [messages-lifecycle.md § Push notifications](algorithms/messages-lifecycle.md#push-notifications). If a **signed** `delivered` receipt arrives, the Server drops the copy. If none arrives within the **push backstop delay**, the Server fires the same push as a backstop, covering a zombie binding that silently swallowed the live publish. If none arrives within the hold window, it does **not** re-publish — the copy simply flushes to the DB and waits.
 *   During the in-memory hold window the **sender's outbox is the durable backup**, so the hot tier is allowed to be non-durable.
 *   **Backstop (the redelivery mechanism):** whenever Bob's app (re)connects it calls `GET /api/inbox` directly on the Server to pull anything it missed live. This HTTP sync path is independent of any Hub and returns the union of the hot and cold tiers, so a message is always eventually delivered even if the live attempt was missed.
 *   **Undecryptable backstop (negative ack):** if Bob receives the copy but **cannot decrypt** it — it was sealed to a stale identity / pre-key after he logged in on a new device — he returns a signed **`undecryptable`** receipt. The Server **drops the retained copy** (no one can decrypt it, so retrying delivery is pointless) and relays the NACK to Alice, who re-fetches Bob's current bundle and **resends once** under a fresh session. This prevents an undecryptable message from looping forever in the inbox (it is never acknowledged by a normal `delivered`). See [MESSAGE_SECURITY.md §2.1](MESSAGE_SECURITY.md#21-key-lifecycle-logout--single-active-device-policy).
@@ -248,9 +261,59 @@ Each event is recorded as an **OpenTelemetry LogRecord** (`severityText` WARN/ER
 
 **Privacy:** the payload is diagnostics only. Bodies and attributes are scrubbed of tokens, JWTs, emails and long blobs before leaving the device, and telemetry **never carries end-to-end message content** — consistent with the E2E model elsewhere in this document.
 
+### 2.9 1:1 Audio/Video Calls (WebRTC)
+
+Two direct contacts can start an **audio or video call**. Media flows **peer-to-peer** over WebRTC: the browsers exchange audio/video directly, encrypted with **DTLS-SRTP**. The Server, the Hubs and RabbitMQ **never carry media** — they only relay a handful of small, E2E-encrypted **signaling** messages that set the call up. Phase 1 has a single active device per user, so a call rings exactly one device.
+
+**Signaling (hybrid).** Every signal (`offer`, `ringing`, `answer`, `ice`, `hangup`, `decline`, `busy`) is a `call` envelope encrypted over the existing pairwise **Double Ratchet**, so the backend sees only ciphertext. Two transports are used, matched to what each signal needs:
+
+*   **Offer → Server (`POST /messages`).** The callee may be offline or backgrounded, so the offer takes the normal send path and inherits its wake-up. It carries a plaintext `hint: call`, which makes the Server send a Web Push **"Incoming call from X"** (own notification tag, no debounce, push TTL equal to the offer TTL, high urgency). The hint is kept in the hot tier only. A call offer uses a **shorter push backstop delay** than a chat message, so a callee whose Hub binding is a zombie is still woken while the call rings. The callee acknowledges the offer with a normal signed `delivered` receipt so it leaves the inbox; an offer is never shown as a chat message.
+*   **Everything after the offer → Hub (`call_signal` frame).** Once the callee rings, both parties are online, so `ringing`, `answer`, `ice`, `hangup`, `decline` and `busy` travel as an ephemeral client→Hub frame. The Hub stamps the authenticated `senderId` (from the JWT, never from the frame), publishes it to `calls.exchange` with routing key `call.<recipientId>` (non-persistent, short expiry), and the recipient's Hub pushes it over the WebSocket. Nothing is stored: a signal for a recipient who is not connected is dropped, exactly like `typing`.
+
+**Offer expiry.** An offer is meaningful for a short time only. The callee reads the sender's send time `ts` from **inside** the encrypted envelope and ignores offers older than **60 s** (still acknowledging them so they leave the inbox); such an offer is recorded as a missed call. The caller rings for the same 60 s, so a callee woken by the push backstop still reaches a ringing caller. The Server has no per-message TTL.
+
+**Security.** The SDP in the offer and answer contains each browser's **DTLS certificate fingerprint**. Because it travels inside the Double Ratchet, it is bound to the contact's pinned identity key: neither a relay nor the Server can substitute its own fingerprint to man-in-the-middle the media. The media keys are negotiated by DTLS directly between the browsers and never leave them. The backend observes metadata only — that A called B, when, and the signaling volume. ICE candidates (which contain IP addresses) are inside the ciphertext, but on a direct connection the two peers necessarily learn each other's public IP.
+
+**NAT traversal (STUN only).** To connect across home routers, each browser asks the self-hosted **coturn (STUN only)** for its public address (a server-reflexive candidate) and the peers then open a direct UDP path (ICE hole punching). The client receives its ICE servers as a **list** from runtime config, so a TURN relay can be added later without a client redesign. Without a relay, peers behind symmetric NAT, carrier-grade NAT or restrictive firewalls cannot connect; the call then ends with "could not connect". The TURN fallback is deferred — see [FUTURE_EXTENSIONS.md §14](FUTURE_EXTENSIONS.md#14-turn-relay-for-calls).
+
+**Call log.** When a call ends, each device writes a **local** system entry into the conversation timeline (missed / declined / cancelled / busy / failed / ended + duration). It is never transmitted and contains no message content.
+
+```mermaid
+sequenceDiagram
+    participant A as Alice PWA (caller)
+    participant STUN as coturn (STUN)
+    participant S as Server
+    participant H as Hubs + calls.exchange
+    participant B as Bob PWA (callee)
+
+    A->>STUN: Binding request (my public address?)
+    A->>S: POST /messages {payload: E2E(offer), hint: call}
+    alt Bob online
+        S->>H: Publish user.bob
+        H-->>B: messageReceived (offer)
+    else Bob offline (no binding)
+        S-->>B: Web Push "Incoming call from Alice" (immediate)
+        B->>S: GET /inbox (offer, used only if < 60 s old)
+    else Bob zombie binding (no receipt within call backstop delay)
+        S-->>B: Web Push "Incoming call from Alice" (backstop)
+        B->>S: GET /inbox (offer, used only if < 60 s old)
+    end
+    B->>S: Signed delivered receipt
+    B->>H: call_signal E2E(ringing)
+    H-->>A: call_signal (ringing)
+    A->>H: call_signal E2E(ice candidates)
+    H-->>B: call_signal (ice candidates)
+    B->>STUN: Binding request
+    B->>H: call_signal E2E(answer + ice)
+    H-->>A: call_signal (answer + ice)
+    Note over A,B: Audio/video flows directly A ↔ B (DTLS-SRTP), no server involved
+    A->>H: call_signal E2E(hangup)
+    H-->>B: call_signal (hangup)
+```
+
 ## 3. Storage Strategy
 
-*   **Client (Angular):** **IndexedDB** is used for storing the user's Signal keys and per-contact ratchet session state, cached identity keys of contacts, decrypted chat history, and the **outbox** of unconfirmed outgoing messages.
+*   **Client (Angular):** **IndexedDB** is used for storing the user's Signal keys and per-contact ratchet session state, cached identity keys of contacts, decrypted chat history, local call-log entries, and the **outbox** of unconfirmed outgoing messages.
 *   **Server — two-tier inbox:** The Server owns the message inbox as the source of truth, split into a hot and a cold tier to keep database operations low:
     *   **Hot tier (in-memory pending map):** holds messages only during the short post-accept hold window, keyed by message id. It is **discardable** — durability during the window is provided by the **sender's outbox**, so the hot tier is plain **JVM heap** in the single Server instance. The hold window length `N` is a tunable knob that trades memory for database writes: messages confirmed by a signed receipt within `N` cost **zero** DB writes; lowering `N` reduces memory at the cost of writing sooner. (Sharing this tier across multiple Server instances via Redis is a deferred concern — see [FUTURE_EXTENSIONS.md](FUTURE_EXTENSIONS.md).)
     *   **Cold tier (PostgreSQL `inbox` + `inbox_pending`):** the durable store, **single-copy for both 1:1 and group messages**. The payload is written **once** to `inbox` (keyed by `message_id`, with `group_id` NULL for a 1:1 send), only if it is not confirmed within the hold window; the recipients still owing a signed receipt are one row each in `inbox_pending`. A verified **signed delivery receipt** deletes that recipient's `inbox_pending` row, and a database trigger drops the shared `inbox` payload once its last pending row is gone. PostgreSQL is required (not a queue) because the inbox needs random access by message id, repeated re-publish of the same message, and `GET /inbox` reads — none of which a FIFO queue provides.
@@ -265,7 +328,7 @@ Each event is recorded as an **OpenTelemetry LogRecord** (`severityText` WARN/ER
 Phase 1 runs a **single Server instance**, a single PostgreSQL database, a single RabbitMQ broker, and one or more **Hubs** in the trusted environment. The Server and Hub scale differently and are deliberately split:
 
 1. **Server (REST HTTP traffic):** A **single instance** handles auth, message **send**, `/inbox` sync, and signed-receipt intake. Its per-message work is just *accept + publish*, so a single vertically-scaled instance handles substantial throughput. (Running multiple Server instances requires a shared hot tier and is a deferred concern — see [FUTURE_EXTENSIONS.md](FUTURE_EXTENSIONS.md).)
-2. **Hub (WebSocket traffic):** Hubs maintain the long-lived connections used **only for live delivery to recipients** (clients never send through a Hub). The expensive resource — holding many idle connections — lives here, and **Hubs scale horizontally independently of the single Server**. The Load Balancer terminates SSL and distributes WebSocket connections (e.g. "Least Connections"); sticky sessions are NOT required because RabbitMQ is the unified fan-out backplane.
+2. **Hub (WebSocket traffic):** Hubs maintain the long-lived connections used **only for live delivery to recipients** and ephemeral control frames (clients never send messages through a Hub). The expensive resource — holding many idle connections — lives here, and **Hubs scale horizontally independently of the single Server**. The Load Balancer terminates SSL and distributes WebSocket connections (e.g. "Least Connections"); sticky sessions are NOT required because RabbitMQ is the unified fan-out backplane.
 
 ```mermaid
 flowchart TD
@@ -291,5 +354,6 @@ flowchart TD
 
 *   **Routing:** To message Charlie, Bob `POST`s to the **Server**, which publishes `user.charlie` to RabbitMQ; whichever Hub Charlie is connected to consumes it and pushes it to Charlie. Hubs never talk to each other and never carry the send path.
 *   **Resilience:** If a Hub goes down, the recipient's WebSocket disconnects and the app silently reconnects to another Hub; its `user.<id>` binding moves with it, and any messages missed while disconnected are pulled via `GET /api/inbox`. Durability never depends on a Hub.
+*   **STUN (coturn):** a single stateless container in STUN-only mode. Port **3478 (UDP, plus TCP)** is published **directly on the host**, not through the Load Balancer / nginx, because STUN must observe the client's real source address. It carries no media; the call media path is browser ↔ browser (see [2.9](#29-11-audiovideo-calls-webrtc)).
 
 > **Beyond Phase 1.** Offloading connection-holding to untrusted third-party **volunteer Hubs**, and scaling the Server horizontally with **Redis**, are described in [FUTURE_EXTENSIONS.md](FUTURE_EXTENSIONS.md). Both are designed to drop in without changing the Phase 1 client wire format or send path.

@@ -41,8 +41,8 @@
       "user": "fourletters-hub",
       "vhost": "/",
       "configure": "^$",
-      "write": "^(hub\\.queue\\..*|presence\\.exchange)$",
-      "read": "^(messages\\.exchange|hub\\.queue\\..*|presence\\.exchange)$"
+      "write": "^(hub\\.queue\\..*|presence\\.exchange|calls\\.exchange)$",
+      "read": "^(messages\\.exchange|hub\\.queue\\..*|presence\\.exchange|calls\\.exchange)$"
     }
   ],
   "topic_permissions": [],
@@ -61,6 +61,15 @@
     },
     {
       "name": "presence.exchange",
+      "vhost": "/",
+      "type": "topic",
+      "durable": true,
+      "auto_delete": false,
+      "internal": false,
+      "arguments": {}
+    },
+    {
+      "name": "calls.exchange",
       "vhost": "/",
       "type": "topic",
       "durable": true,

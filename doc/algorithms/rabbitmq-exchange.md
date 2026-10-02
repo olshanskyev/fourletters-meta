@@ -16,12 +16,14 @@ For the high-level send/receive flow, see [2.4 Message Sending & Receiving (Serv
 | `presence.exchange` | Topic exchange | **Broker definitions** (static, `definitions.json`) | Broker boot | Never (long-lived definition) | Durable *definition*; carries **transient** presence/typing metadata |
 | Binding `presence.{id}` → `hub.queue.{hubId}` | Binding (online marker) | **Hub** that *holds* the user (owner) | That user's WebSocket **connects** | That user **disconnects** | n/a |
 | Binding `watch.{id}` → `hub.queue.{hubId}` | Binding (watch interest) | **Hub** with a local *watcher* | A local client **opens a chat** with that user | The **last** local watcher closes the chat | n/a |
+| `calls.exchange` | Topic exchange | **Broker definitions** (static, `definitions.json`) | Broker boot | Never (long-lived definition) | Durable *definition*; carries **transient** call signals with a short per-message expiry |
+| Binding `call.{id}` → `hub.queue.{hubId}` | Binding (call-signal sink) | **Hub** that *holds* the user | That user's WebSocket **connects** | That user **disconnects** | n/a |
 
-That is the **entire** Phase 1 message topology: one exchange, one ephemeral queue per Hub, and one binding per online user. The **presence** rows above layer on top for the live online/typing signal (see [Presence & Typing](#presence--typing-presenceexchange)); they add **no new queue** — every Hub reuses its existing `hub.queue.{hubId}` — and the exchange is declared **statically in the broker definitions**, never by the Hub (which still has zero `configure` rights).
+That is the **entire** Phase 1 message topology: one exchange, one ephemeral queue per Hub, and one binding per online user. The **presence** rows above layer on top for the live online/typing signal (see [Presence & Typing](#presence--typing-presenceexchange)), and the **calls** rows for ephemeral call signaling (see [Call Signaling](#call-signaling-callsexchange)); they add **no new queue** — every Hub reuses its existing `hub.queue.{hubId}` — and the exchanges are declared **statically in the broker definitions**, never by the Hub (which still has zero `configure` rights).
 
 ### Who declares what, and why
 
-- **Long-lived exchanges are declared once, statically, in the broker's `definitions.json`; only *dynamic* objects are declared programmatically by their owner.** Both `messages.exchange` and `presence.exchange` are permanent, so they live in the broker definitions — a single source of topology truth — rather than being created from application code. This also lets the Server keep **`configure` denied on the exchanges** (it only needs `write` to publish), tightening least-privilege.
+- **Long-lived exchanges are declared once, statically, in the broker's `definitions.json`; only *dynamic* objects are declared programmatically by their owner.** `messages.exchange`, `presence.exchange` and `calls.exchange` are all permanent, so they live in the broker definitions — a single source of topology truth — rather than being created from application code. This also lets the Server keep **`configure` denied on the exchanges** (it only needs `write` to publish), tightening least-privilege.
 - **The Server declares only the dynamic per-Hub queues.** The Hub itself has **no permission to create or delete queues or exchanges** — it can only *bind* and *consume*. This is deliberate: a Hub that could declare queues could flood the broker with thousands of them (a resource-exhaustion DoS), which matters once Hubs are untrusted. By keeping queue creation on the Server (and exchanges static in definitions), the number of queues is capped at exactly **one per authenticated Hub**.
 - **One queue per Hub, provisioned on registration.** When a Hub starts it authenticates to the Server; the Server (idempotently) declares that Hub's `hub.queue.{hubId}` as `auto-delete` and returns the queue name to the Hub. Because the queue is `auto-delete`, it disappears automatically once the Hub's consumer disconnects, so a crashed or restarted Hub still cleans up with no central bookkeeping. The queue is declared **durable** (definition only) rather than transient: RabbitMQ deprecated transient non-exclusive queues, and the queue cannot be exclusive because an exclusive queue is bound to the declaring (Server) connection while the Hub is the consumer. Durability of the *definition* does not make messages persistent — the bus stays transient.
 - **The Hub manages only bindings, per connection.** When Bob's WebSocket connects to Hub A, Hub A binds `user.bob` to its own queue; when Bob disconnects, Hub A unbinds it. Binding is the **only** topology operation a Hub performs. Bindings are therefore **live presence**: a routing key is bound **if** that user currently has an open WebSocket somewhere. (Restricting *which* `user.{id}` a Hub may bind is the separate per-identity enforcement deferred to [FUTURE_EXTENSIONS.md](../FUTURE_EXTENSIONS.md#4-route-scoping--scoped-transport-tokens).)
@@ -29,7 +31,8 @@ That is the **entire** Phase 1 message topology: one exchange, one ephemeral que
 ### Direction of traffic (Phase 1)
 
 - **Server → RabbitMQ:** publish-only. The Server publishes accepted payloads to `messages.exchange` with routing key `user.{recipientId}`, marked **`mandatory`** so the broker returns any envelope it cannot route to a live binding. The Server never consumes from RabbitMQ in Phase 1.
-- **RabbitMQ → Hub:** consume-only. A Hub only consumes from its own `hub.queue.{hubId}`. A Hub **never publishes** to `messages.exchange` (clients never send through a Hub — sending always goes PWA → Server).
+- **RabbitMQ → Hub:** consume-only. A Hub only consumes from its own `hub.queue.{hubId}`. A Hub **never publishes** to `messages.exchange` (clients never send messages through a Hub — sending always goes PWA → Server).
+- **Hub → `presence.exchange` / `calls.exchange`:** a Hub publishes only ephemeral metadata and call signals on these separate exchanges (see [Presence & Typing](#presence--typing-presenceexchange) and [Call Signaling](#call-signaling-callsexchange)).
 - **Signed delivery receipts do not transit RabbitMQ.** They travel from the recipient's client **directly to the Server over HTTPS**, out of band from the live bus. RabbitMQ carries forward delivery only.
 
 ## Routing Behaviour
@@ -60,6 +63,16 @@ The live presence/typing signal adds exactly two grants to the Hub credential an
 - **`write` on `messages.exchange` still denied** — presence lives on a **separate** exchange, so granting presence-publish does **not** let a Hub inject or forge real messages.
 
 What a rogue Hub *can* do with the presence grant is bounded to **non-sensitive metadata**: forge "user X is online / typing" (publish or bind `presence.{X}`) and observe presence of users it **watches**. It cannot read message content (E2E), inject messages (`messages.exchange` write denied), alter topology (`configure` denied), or affect durability (Server-owned). Because presence is a **topic** exchange routed per-user, a Hub only receives presence for users its own clients are chatting with. Tightening presence for **untrusted** Hubs (anti-forge binding scoping + probe rate-limiting) is deferred alongside the existing per-identity enforcement — see [FUTURE_EXTENSIONS.md §15](../FUTURE_EXTENSIONS.md#15-presence--last-seen-persistence--untrusted-hub-hardening).
+
+### Call-signaling additions to the baseline (Phase 1)
+
+Call signaling adds the same two grants on its own exchange and again **preserves every existing deny**:
+
+- **`write` on `calls.exchange`: allowed** — so a Hub can publish a client's call signal to `call.{recipientId}`.
+- **`read` on `calls.exchange`: allowed** — so a Hub can bind `call.{id}` to its own `hub.queue.{hubId}` for each user it holds.
+- **`configure` still `^$`** and **`write` on `messages.exchange` still denied** — call signals live on a separate exchange and can never be mistaken for, or used to inject, messages.
+
+What a rogue Hub *can* do with this grant is bounded: drop or delay call signals (the call fails to connect), observe call **metadata** (who signals whom, when) for users it holds, or bind `call.{X}` for another user to receive their signals. It cannot read or forge signal content — every payload is E2E-encrypted and authenticated over the pairwise Double Ratchet, a forged `senderId` fails to decrypt, and the DTLS fingerprints inside are authenticated the same way, so it cannot insert itself into the media path. Scoping *which* `call.{id}` a Hub may bind folds into the same deferred per-identity enforcement as `user.{id}`.
 
 ## Presence & Typing (`presence.exchange`)
 
@@ -153,6 +166,44 @@ flowchart TD
     Pub --> PX --> RelayEv
 ```
 
+## Call Signaling (`calls.exchange`)
+
+A 1:1 call is set up with a handful of small signals (see [ARCHITECTURE.md §2.9](../ARCHITECTURE.md#29-11-audiovideo-calls-webrtc)). The **offer** travels the normal message path (`POST /messages` → `messages.exchange`) so it can wake an offline callee. Every later signal — `ringing`, `answer`, `ice`, `hangup`, `decline`, `busy` — travels **Hub → Hub** over `calls.exchange` and is never stored. Media never transits RabbitMQ.
+
+| Routing key | Bound by | Meaning | Removed when |
+| --- | --- | --- | --- |
+| `call.{id}` | the Hub that **holds** user `id` | "deliver call signals for id here" | id's session closes (graceful close or ≤70 s pong-timeout eviction) |
+
+### Wire protocol
+
+| Direction | Frame | Meaning |
+| --- | --- | --- |
+| Client → Hub | `{ "type": "call_signal", "recipientId": "Y", "payload": "<E2E ciphertext>" }` | Relay this call signal to Y. |
+| Hub → Client | `{ "type": "call_signal", "senderId": "X", "payload": "<E2E ciphertext>" }` | A call signal from X. |
+
+The **sender's Hub** builds the `Hub → Client` frame — `senderId` taken from the connection's validated JWT, never from the client frame — and publishes it **verbatim** to `calls.exchange` with routing key `call.{recipientId}`. The recipient's Hub forwards the body to the local session unmodified, exactly like a presence event.
+
+### Publish properties
+
+- **Non-persistent** delivery mode and a per-message **expiration of 30 s**: a signal that is stuck in a queue longer than that is useless and is discarded by the broker.
+- **No reliance on returns.** A signal for a recipient without a `call.{id}` binding is unroutable and simply dropped; the Hub's returns-callback ignores returned `call.*` envelopes. The caller learns about an unreachable callee from its own ring timeout.
+
+### Hub behaviour
+
+- **Local user X connects:** bind `call.{X}` (alongside `user.{X}` and `presence.{X}`).
+- **Local session closes:** unbind `call.{X}`.
+- **Client `call_signal(recipientId, payload)`:** validate the recipient id and the payload size (≤ 64 KiB), then publish as above.
+- **Consume `calls.exchange`, key `call.{X}`:** forward the body to X's local session, then ack (ack-and-drop if X has no local session).
+
+```mermaid
+flowchart LR
+    A[Caller PWA] -- "call_signal(recipientId=B, payload)" --> HA[Hub A]
+    HA -- "stamp senderId from JWT<br/>publish call.B (non-persistent, 30 s expiry)" --> CX{{calls.exchange<br/>Is call.B bound?}}
+    CX -- routable --> HB[Hub B]
+    CX -- unroutable --> Drop[Dropped]
+    HB -- "call_signal(senderId=A, payload)" --> B[Callee PWA]
+```
+
 ## Block Algorithm (Phase 1)
 
 Below is the flowchart illustrating the step-by-step logic executed by the Server, the internal RabbitMQ topology, and the Hub.
@@ -207,6 +258,7 @@ The Phase 1 topology above is unchanged by the following; they layer on top with
 
 - **Per-identity binding enforcement** — restricting *which* `user.{id}` a connection may bind, via the RabbitMQ OAuth2 backend (scoped transport tokens) or Server-mediated bindings. Required before any untrusted **volunteer Hub** is deployed.
 - **Presence anti-forge & probe rate-limiting** — restricting *which* `presence.{id}`/`watch.{id}` keys a Hub may bind and publish, and capping probe/publish rate. Non-sensitive metadata only, but required before untrusted Hubs. See [FUTURE_EXTENSIONS.md §15](../FUTURE_EXTENSIONS.md#15-presence--last-seen-persistence--untrusted-hub-hardening).
+- **Call-signal binding scoping** — restricting *which* `call.{id}` a Hub may bind, as part of the same per-identity enforcement. Signal content is already E2E-protected; this only limits metadata exposure and signal dropping.
 - **Persistent "last seen"** — a durable last-online timestamp, which the Phase 1 relay-only presence intentionally omits. See [FUTURE_EXTENSIONS.md §15](../FUTURE_EXTENSIONS.md#15-presence--last-seen-persistence--untrusted-hub-hardening).
 - **RabbitMQ clustering** — running the broker as a cluster for availability once Server/Hub fleets grow.
 
