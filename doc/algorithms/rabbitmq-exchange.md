@@ -16,6 +16,8 @@ For the high-level send/receive flow, see [2.4 Message Sending & Receiving (Serv
 | `presence.exchange` | Topic exchange | **Broker definitions** (static, `definitions.json`) | Broker boot | Never (long-lived definition) | Durable *definition*; carries **transient** presence/typing metadata |
 | Binding `presence.{id}` → `hub.queue.{hubId}` | Binding (online marker) | **Hub** that *holds* the user (owner) | That user's WebSocket **connects** | That user **disconnects** | n/a |
 | Binding `watch.{id}` → `hub.queue.{hubId}` | Binding (watch interest) | **Hub** with a local *watcher* | A local client **opens a chat** with that user | The **last** local watcher closes the chat | n/a |
+| Binding `typing.user.{id}` → `hub.queue.{hubId}` | Binding (direct typing sink) | **Hub** holding the recipient | Recipient's WebSocket connects | Recipient disconnects | n/a |
+| Binding `typing.group.{id}` → `hub.queue.{hubId}` | Binding (group typing interest) | **Hub** with local group watchers | First local group typing subscription | Last watcher unsubscribes or disconnects | n/a |
 | `calls.exchange` | Topic exchange | **Broker definitions** (static, `definitions.json`) | Broker boot | Never (long-lived definition) | Durable *definition*; carries **transient** call signals with a short per-message expiry |
 | Binding `call.{id}` → `hub.queue.{hubId}` | Binding (call-signal sink) | **Hub** that *holds* the user | That user's WebSocket **connects** | That user **disconnects** | n/a |
 
@@ -58,11 +60,14 @@ The remaining gap, deferred to a later phase: with a **shared** credential acros
 The live presence/typing signal adds exactly two grants to the Hub credential and **preserves every existing deny**:
 
 - **`write` on `presence.exchange`: allowed** — required so a Hub can publish presence/typing events (a user on this Hub came online/went offline, or is typing).
-- **`read` on `presence.exchange`: allowed** — required so a Hub can bind its own `hub.queue.{hubId}` to the topic exchange (`presence.{id}` / `watch.{id}` keys) to consume presence events and receive probes (binding a queue to an exchange needs *read* on the exchange).
+- **`read` on `presence.exchange`: allowed** — required for `presence.{id}`, `watch.{id}`, `typing.user.{id}`, and `typing.group.{id}` bindings on the existing Hub queue.
 - **`configure` still `^$`** — the Hub still **cannot declare or delete** `presence.exchange` (or anything else); the exchange is provisioned statically in `definitions.json`. The queue-flooding DoS ceiling is unchanged.
 - **`write` on `messages.exchange` still denied** — presence lives on a **separate** exchange, so granting presence-publish does **not** let a Hub inject or forge real messages.
 
-What a rogue Hub *can* do with the presence grant is bounded to **non-sensitive metadata**: forge "user X is online / typing" (publish or bind `presence.{X}`) and observe presence of users it **watches**. It cannot read message content (E2E), inject messages (`messages.exchange` write denied), alter topology (`configure` denied), or affect durability (Server-owned). Because presence is a **topic** exchange routed per-user, a Hub only receives presence for users its own clients are chatting with. Tightening presence for **untrusted** Hubs (anti-forge binding scoping + probe rate-limiting) is deferred alongside the existing per-identity enforcement — see [FUTURE_EXTENSIONS.md §15](../FUTURE_EXTENSIONS.md#15-presence--last-seen-persistence--untrusted-hub-hardening).
+Presence/typing metadata is not confidential from relays, and indicators can be forged, delayed,
+or suppressed by a malicious Hub. Group typing
+has no membership checks. These accepted limitations do not grant message-publish rights or
+expose E2E content; see [known metadata limitations](../ARCHITECTURE.md#51-presence-and-typing-metadata).
 
 ### Call-signaling additions to the baseline (Phase 1)
 
@@ -76,7 +81,9 @@ What a rogue Hub *can* do with this grant is bounded: drop or delay call signals
 
 ## Presence & Typing (`presence.exchange`)
 
-Online status and "is typing" are delivered **entirely through the Hub layer** — no Server involvement and no new storage. The Hub stays a pure relay: it holds only **transient subscription-routing state** (which local client is watching which contact) and **persists nothing** — no presence values, no timestamps. "Last seen" is intentionally **not** part of this and is deferred to [FUTURE_EXTENSIONS.md §15](../FUTURE_EXTENSIONS.md#15-presence--last-seen-persistence--untrusted-hub-hardening).
+Online status and typing use the Hub layer, without Server lookups or storage. The Hub holds only
+transient routing state for contact presence and group typing. Persistent last seen is
+[deferred](../FUTURE_EXTENSIONS.md#151-persistent-last-seen).
 
 ### Presence = routability, exactly like messages
 
@@ -85,14 +92,20 @@ The design reuses the one primitive the message path already relies on: **a rout
 - A Hub **may not publish to `messages.exchange`** (the no-injection invariant), so it cannot probe the `user.{id}` bindings directly.
 - Therefore each Hub **mirrors** its online users onto `presence.exchange` as `presence.{id}` bindings — which it *is* allowed to manage — and probes those instead.
 
-`presence.exchange` is a **topic** exchange with two routing-key namespaces, both bound on the Hub's existing `hub.queue.{hubId}` (no new queue, no `configure`):
+`presence.exchange` has four routing-key namespaces, all on the existing Hub queue (no new queue
+or exchange, no `configure`):
 
 | Routing key | Bound by | Meaning | Removed when |
 | --- | --- | --- | --- |
 | `presence.{id}` | the Hub that **holds** user `id` (owner) | "id is online here" — the **probe target** | id's session closes — graceful close **or** ≤70 s pong-timeout eviction |
 | `watch.{id}` | a Hub with a local client **watching** `id` | "deliver id's events here" — the **event sink** | id's **last** local watcher's session closes — chat closed, **or** app dropped (≤70 s eviction) |
+| `typing.user.{id}` | Hub holding recipient `id` | Deliver direct typing only to that recipient | Recipient disconnects |
+| `typing.group.{id}` | Hub with local watchers of group `id` | Deliver group typing to those watchers | Last local watcher unsubscribes or disconnects |
 
-Both unbinds are driven by **session teardown**, not by a client message: `afterConnectionClosed` fires on a graceful close *and* on the ≤70 s pong-timeout eviction, so a dropped app is cleaned up on the same timer as everything else. If a whole Hub dies, its `auto-delete` `hub.queue.{hubId}` disappears and takes **all** its `presence.*` / `watch.*` bindings with it — the broker-level backstop. (A briefly-stale `watch.{id}` is harmless anyway: events arrive with no local watcher and are acked-and-dropped.)
+Subscription routes unbind when their last local watcher unsubscribes or disconnects. Session
+teardown also releases the user's automatic routes, including heartbeat eviction of dropped apps.
+If a Hub dies, its auto-delete queue removes all bindings. Deliveries without local targets are
+acked-and-dropped. Active subscriptions must be re-sent after reconnect.
 
 ### Snapshot without a query: `mandatory` probe + owner re-announce
 
@@ -109,33 +122,51 @@ This reuses the same **mandatory-return** primitive the Server already uses as i
 
 | Direction | Frame | Meaning |
 | --- | --- | --- |
-| Client → Hub | `{ "type": "presence_subscribe", "userId": "X" }` | "I opened a chat with X — start telling me X's online/typing state." |
+| Client → Hub | `{ "type": "presence_subscribe", "userId": "X" }` | Watch X's online/offline state, not typing. |
 | Client → Hub | `{ "type": "presence_unsubscribe", "userId": "X" }` | "I closed the chat — stop." |
-| Client → Hub | `{ "type": "typing" }` | "I am typing (in my active chat)." Sender id comes from the session. |
+| Client → Hub | `{ "type": "typing", "recipientId": "Y" }` | Typing to direct recipient Y. Sender comes from authentication. |
+| Client → Hub | `{ "type": "typing", "groupId": "G" }` | Typing in group G. |
+| Client → Hub | `{ "type": "typing_group_subscribe", "groupId": "G" }` | Start watching group G's typing. |
+| Client → Hub | `{ "type": "typing_group_unsubscribe", "groupId": "G" }` | Stop watching group G's typing. |
 | Hub → Client | `{ "type": "presence", "userId": "X", "status": "online" \| "offline" }` | Current/updated state of a watched contact. |
-| Hub → Client | `{ "type": "typing", "userId": "X" }` | Watched contact X is typing. |
+| Hub → Client | `{ "type": "typing", "userId": "X" }` | X is typing to this recipient; groupId is absent. |
+| Hub → Client | `{ "type": "typing", "userId": "X", "groupId": "G" }` | X is typing in watched group G; clients ignore self-events. |
 
-**Hub → `presence.exchange` (topic) payloads.** Carry a single `userId`, **never a conversation pair**:
+**Client → Hub validation:** typing commands require exactly one valid UUID destination
+(`recipientId` or `groupId`). Commands with neither or both destinations are ignored.
+Group typing commands and subscriptions have no membership checks.
 
-- **Event** (owner → watchers), routing key `watch.{id}`: the body is the **client frame verbatim** — `{ "type": "presence", "userId": "X", "status": "online" | "offline" }` or `{ "type": "typing", "userId": "X" }` — so a receiving Hub forwards it to local watchers unmodified, exactly like a message.
+**Hub → `presence.exchange` payloads:**
+
+- **Presence event**, `watch.{id}`: the online/offline client frame, forwarded unchanged to watchers.
+- **Direct typing**, `typing.user.{recipientId}`: `{ "type": "typing", "userId": "X" }`.
+- **Group typing**, `typing.group.{groupId}`: `{ "type": "typing", "userId": "X", "groupId": "G" }`.
+- Typing publications are non-persistent with a **3000 ms expiry**. Unroutable typing returns are
+    ignored; there is no inbox, push notification, or replay. Sender identity is stamped from JWT.
 - **Probe** (watcher → owner), routing key `presence.{id}`, published `mandatory`: empty body — its **routability** is the signal, not its content.
 
 ### Hub behaviour (relay only)
 
-- **Local user X connects** (`afterConnectionEstablished`): bind `presence.{X}`; publish `presence(X, online)` to `watch.{X}` (notifies anyone already watching).
-- **Local session closes** (`afterConnectionClosed` — graceful **or** the ≤70 s pong-timeout eviction, so an app drop needs no client message): for that session's user X, unbind `presence.{X}` and publish `presence(X, offline)` to `watch.{X}`; and remove the session from every watch-set, unbinding each `watch.{id}` that just lost its last local watcher.
-- **Client `typing`** (session-user X): publish `typing(X)` to `watch.{X}`.
+- **Local user X connects:** bind `presence.{X}` and `typing.user.{X}`; announce online to `watch.{X}`.
+- **Local session closes:** release automatic bindings, announce offline, and use `watchedBy`
+    to remove all presence/group watches. Unbind routes losing their last local watcher.
+- **Client `typing`:** publish to the direct recipient or group route, never to `watch.{senderId}`.
+- **Group subscribe/unsubscribe:** add/remove a local watcher of `typing.group.{G}`, binding
+    for the first and unbinding for the last.
 - **Client `presence_subscribe(X)`**: bind `watch.{X}` (if the first local watcher); take the snapshot — a **local** session answers `online` immediately, otherwise publish the `mandatory` probe `presence.{X}` (owner re-announces online, or the return answers offline).
 - **Client `presence_unsubscribe(X)`**: drop the local watcher; unbind `watch.{X}` if it was the last. (This is only the *chat-closed-but-app-open* path; a dropped app is handled by the session-close rule above.)
 - **Consume from `hub.queue.{hubId}`** — routed by `receivedExchange` and key:
   - `messages.exchange` → the existing opaque message relay.
-  - `presence.exchange`, key `watch.{X}` → a presence/typing event for a user this Hub watches → forward the body to local watchers of X.
+    - `presence.exchange`, key `watch.{X}` → forward presence to local contact watchers.
+    - `presence.exchange`, key `typing.user.{X}` → forward only to X's local session.
+    - `presence.exchange`, key `typing.group.{G}` → forward only to local group watchers.
   - `presence.exchange`, key `presence.{X}` → an inbound **probe** (routed here because this Hub owns X) → re-announce `presence(X, online)` to `watch.{X}`, then ack.
 
 ### Properties
 
-- **Online/offline is pure routability**; ongoing typing and transitions are ordinary routed events to `watch.{id}`.
-- **Scoped metadata** — events for X reach **only** Hubs that watch X, and probes for X reach **only** X's owner Hub, so a Hub sees presence only for users its own clients chat with.
+- **Online/offline is routability**; transitions use `watch.{id}`, typing uses destination routes.
+- **Routing is not authorization:** only bound queues receive events, but relays can observe
+    metadata on their routes. No group membership or metadata-confidentiality guarantee is made.
 - **Same permissions, same queue** — still `write`+`read` on `presence.exchange`, bindings on the Hub's own `hub.queue.{hubId}`; no `configure`, no `messages.exchange` write.
 
 ```mermaid
@@ -153,7 +184,7 @@ flowchart TD
     end
     subgraph HubB [Hub B - owns X]
         BindPres[X connects: bind presence.X]
-        Pub[Publish X events to watch.X]
+        Pub[Publish X online/offline to watch.X]
         Reann[Inbound probe: re-announce X online to watch.X]
     end
 
@@ -257,9 +288,9 @@ flowchart TD
 The Phase 1 topology above is unchanged by the following; they layer on top without altering the exchange, queues, or send path. See [FUTURE_EXTENSIONS.md](../FUTURE_EXTENSIONS.md):
 
 - **Per-identity binding enforcement** — restricting *which* `user.{id}` a connection may bind, via the RabbitMQ OAuth2 backend (scoped transport tokens) or Server-mediated bindings. Required before any untrusted **volunteer Hub** is deployed.
-- **Presence anti-forge & probe rate-limiting** — restricting *which* `presence.{id}`/`watch.{id}` keys a Hub may bind and publish, and capping probe/publish rate. Non-sensitive metadata only, but required before untrusted Hubs. See [FUTURE_EXTENSIONS.md §15](../FUTURE_EXTENSIONS.md#15-presence--last-seen-persistence--untrusted-hub-hardening).
 - **Call-signal binding scoping** — restricting *which* `call.{id}` a Hub may bind, as part of the same per-identity enforcement. Signal content is already E2E-protected; this only limits metadata exposure and signal dropping.
-- **Persistent "last seen"** — a durable last-online timestamp, which the Phase 1 relay-only presence intentionally omits. See [FUTURE_EXTENSIONS.md §15](../FUTURE_EXTENSIONS.md#15-presence--last-seen-persistence--untrusted-hub-hardening).
+- **Persistent "last seen"** — a durable last-online timestamp, intentionally omitted from live
+    presence. See [deferred last-seen persistence](../FUTURE_EXTENSIONS.md#151-persistent-last-seen).
 - **RabbitMQ clustering** — running the broker as a cluster for availability once Server/Hub fleets grow.
 
 
