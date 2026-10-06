@@ -353,17 +353,14 @@ This bounds both storage and `/inbox` payload to **O(conversations)** rather tha
 
 ---
 
-## 15. Presence — Last-Seen Persistence & Untrusted-Hub Hardening
-
-**Phase 1 (implemented):** live **online status** and **"is typing"** are relayed **entirely through the Hub layer** over the `presence.exchange` topic exchange — no Server involvement and no storage. Online/offline is derived from **routability** (a `mandatory` probe to `presence.{id}` is routable iff the user is online), and typing/transitions are ordinary routed events to `watch.{id}`; the Hub keeps only transient subscription-routing state and persists nothing (see [rabbitmq-exchange.md § Presence & Typing](algorithms/rabbitmq-exchange.md#presence--typing-presenceexchange)). This is deliberately the relay-only 80/20: a contact is shown **online / typing / offline** live, and offline "last seen" falls back to a client-side approximation (e.g. the last received message's timestamp).
-
-> **Scope: 1:1 only.** Presence and typing are currently wired for **direct conversations** only. Group chats do not subscribe (a group would need per-member fan-out — subscribing to every member's `presence.{id}` and aggregating typing across the roster), which is deferred.
-
-Two capabilities are deferred, both layering on Phase 1 without changing the presence wire frames:
+## 15. Presence — Last-Seen Persistence
 
 ### 15.1 Persistent "last seen"
 
-Relay-only presence cannot answer *"offline since when"* after the fact: the Hub has no DB (by design) and stores nothing, and RabbitMQ is a broker, not a store. Exact last-seen therefore needs a small **Server-assisted** persistence step — the only reason it is deferred rather than shipped, since Phase 1 targets *no Server changes*.
+**Status: deferred, not implemented.** Relay-only presence cannot answer *"offline since when"*
+after the fact: the Hub has no DB (by design) and stores nothing, and RabbitMQ is a broker, not
+a store. Adding last seen requires Server-assisted persistence and a client display/read path.
+A last-message timestamp must not be used as a last-seen substitute.
 
 - **Timestamp semantics:** `last_seen` = *"the most recent moment we had evidence the user was connected."* It is written **event-driven, never polled** — reusing the existing WebSocket lifecycle, with **no new scheduled ping**:
   - On **disconnect** (`afterConnectionClosed`, including the 70 s pong-timeout eviction) → `last_seen = now()`. This is the accurate value; ungraceful drops are captured within the existing ~70 s liveness window.
@@ -372,17 +369,6 @@ Relay-only presence cannot answer *"offline since when"* after the fact: the Hub
 - **Read path:** `last_seen` is consulted **only when the contact is currently offline** (online/typing stay live via the Hub); it is never shown while online. On chat open the value is piggy-backed on the existing chat-open/contact fetch, so no extra round trip.
 - **Do not** store an `online` boolean server-side — it goes stale on a Hub crash. Online/offline stays **live** via the presence routability probe; the DB holds only the timestamp.
 
-### 15.2 Untrusted-Hub hardening for presence
-
-The Phase 1 presence grant (`write`/`read` on `presence.exchange`) is safe for **trusted** Hubs but, like the `user.{id}` binding grant in [§4](#4-route-scoping--scoped-transport-tokens), needs enforcement before **volunteer** Hubs run it. A rogue Hub with presence-publish rights could:
-
-| Threat | Severity | Mitigation (deferred) |
-| --- | --- | --- |
-| **Forge presence/typing** for any `userId` (publish `watch.{id}` events, or bind `presence.{id}` to appear online) | Low — non-sensitive metadata; a Hub can already lie to its own clients | Scope the `presence.{id}`/`watch.{id}` keys a Hub may bind/publish to its own connected users, via the same per-identity mechanism as binding enforcement ([§4](#4-route-scoping--scoped-transport-tokens)). |
-| **Probe/publish spam** (each probe routes to an owner Hub; each event to watchers) | Low–Med — DoS pressure | Per-Hub probe/publish **rate-limit** (RabbitMQ policy / broker throttling). |
-| **Targeted observation** — bind `watch.{victim}` to receive a specific user's presence/typing | Low — timing metadata only; no content, no explicit conversation pairing (payloads carry a single `userId`, never a peer) | Same per-identity binding scoping as above; the topic routing already prevents a Hub from seeing users it does **not** watch. |
-
-Crucially, none of these touch the invariants that already contain a malicious Hub ([§1](#1-the-untrusted-hub-trust-model)): presence rides a **separate** exchange, so `write` on `messages.exchange` stays denied (no message injection), `configure` stays denied (no topology DoS), and content stays E2E. Presence forging is bounded to **non-sensitive metadata**, and durability/authenticity are unaffected.
 
 
 

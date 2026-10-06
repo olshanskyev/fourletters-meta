@@ -357,3 +357,77 @@ flowchart TD
 *   **STUN (coturn):** a single stateless container in STUN-only mode. Port **3478 (UDP, plus TCP)** is published **directly on the host**, not through the Load Balancer / nginx, because STUN must observe the client's real source address. It carries no media; the call media path is browser ↔ browser (see [2.9](#29-11-audiovideo-calls-webrtc)).
 
 > **Beyond Phase 1.** Offloading connection-holding to untrusted third-party **volunteer Hubs**, and scaling the Server horizontally with **Redis**, are described in [FUTURE_EXTENSIONS.md](FUTURE_EXTENSIONS.md). Both are designed to drop in without changing the Phase 1 client wire format or send path.
+
+---
+
+## 5. Known Limitations
+
+These are accepted design boundaries and documented gaps, not additional delivery or security
+guarantees. Links below point to the detailed behavior and, where applicable, deferred extensions.
+
+### 5.1 Presence and typing metadata
+
+Presence and typing metadata are **not confidential from the relay infrastructure**. A Hub
+handling these events can observe user identity and activity timing. Destination-scoped typing
+also exposes the direct recipient or group identifier through plaintext frames and routing keys,
+revealing conversation associations. This exposure is an **accepted privacy limitation**, not
+a promise of future metadata anonymity.
+
+A malicious Hub can retain or correlate the metadata it receives. Checks implemented only in
+Hub code cannot constrain a modified Hub. Broker/Server-enforced route authorization can limit
+access to unrelated streams, but cannot hide metadata in traffic the Hub legitimately relays.
+Encrypting event payloads alone would not hide routing destinations or timing.
+
+Typing indicators are advisory, not cryptographic proof of another user's activity: a malicious
+Hub can also fabricate, suppress, or delay them. These limitations do not expose E2E-encrypted
+message content or weaken the separate message-authenticity and delivery guarantees.
+
+### 5.2 Other documented limitations
+
+- **Single active device and local history.** A new device does not inherit the old device's
+    history or keys. History stored only on the old device is not automatically transferred;
+    in-flight messages have a separate undecryptable/re-delivery recovery path.
+    See [key lifecycle and single-active-device policy](MESSAGE_SECURITY.md#21-key-lifecycle-logout--single-active-device-policy)
+    and [deferred multi-device handling](FUTURE_EXTENSIONS.md#9-multi-device-key-handling).
+- **Trust-on-first-use identities.** First-contact keys are accepted and pinned; changed keys
+    are automatically accepted with a visible warning rather than blocked. Independent protection
+    against directory key substitution requires out-of-band identity verification.
+    See [key-change detection](MESSAGE_SECURITY.md#31-key-change-detection-security-code-changed).
+- **Same-origin local storage access.** Per-user databases provide logical separation, not
+    cryptographic isolation from code running on the same origin. Such code can use stored
+    non-extractable master keys; Signal private/session keys are also accessible to it. At-rest
+    encryption does not protect against an active compromise of the application origin.
+    See [at-rest encryption](MESSAGE_SECURITY.md#12-at-rest-encryption-of-the-per-user-db),
+    [Signal key storage](MESSAGE_SECURITY.md#22-where-the-signal-keys-live), and
+    [deferred per-user key binding](FUTURE_EXTENSIONS.md#8-per-user-at-rest-key-binding).
+- **Live-only presence, no last seen.** Online status reflects live routability, not historical
+    activity. Persistent last-seen timestamps are not implemented, and message timestamps must
+    not be used as a substitute.
+    See [deferred last-seen persistence](FUTURE_EXTENSIONS.md#151-persistent-last-seen).
+- **Direct-call connectivity and IP visibility.** STUN-only calls can fail on restrictive
+    networks or NAT configurations; connected peers learn each other's public IP. Media remains
+    encrypted, but TURN fallback and relay-only privacy are not available in Phase 1.
+    See [call security and NAT traversal](#29-11-audiovideo-calls-webrtc) and
+    [deferred TURN relay](FUTURE_EXTENSIONS.md#14-turn-relay-for-calls).
+- **In-memory restart recovery and single-Server deployment.** A Server restart can lose hot-tier
+    copies before they reach PostgreSQL; recovery relies on the persistent sender outbox and resync.
+    Multiple Server instances require a shared hot tier to preserve consistent inbox reads.
+    See [outbox reconciliation](#26-send-side-reconciliation-outbox-resync) and
+    [shared-tier scaling requirements](FUTURE_EXTENSIONS.md#5-server-horizontal-scaling--the-shared-hot-tier-redis).
+- **Receipt retention and drain gaps.** Pending receipts are held per message in non-durable
+    memory. Restarting loses that state, and a lost delete-on-read inbox response loses its drained
+    receipts; resync is the recovery backstop. Busy chats can accumulate large receipt lists.
+    See [receipt delivery limitations](FUTURE_EXTENSIONS.md#14-receipt-delivery--watermark-model).
+- **Untrusted-Hub readiness.** Phase 1 operates trusted Hubs. Per-identity broker binding
+    enforcement, active withholding detection, and automatic Hub switching are deferred; existing
+    content encryption and direct inbox recovery do not replace these deployment controls.
+    See [volunteer readiness](FUTURE_EXTENSIONS.md#2-design-now-vs-deploy-later-volunteer-readiness)
+    and [route scoping](FUTURE_EXTENSIONS.md#4-route-scoping--scoped-transport-tokens).
+- **Clock-based message ordering.** Authenticated timestamps still depend on sender clocks.
+    Concurrent group messages need not produce an identical causal transcript for every member;
+    future-time clamping does not establish canonical order.
+    See [message ordering limitations](FUTURE_EXTENSIONS.md#12-message-ordering--causal-order-under-an-untrusted-hub).
+- **No periodic signed-pre-key rotation.** The signed pre-key lasts until identity replacement.
+    This extends the exposure window for initial sessions established without a one-time pre-key,
+    not for established Double Ratchet sessions.
+    See [deferred signed-pre-key rotation](FUTURE_EXTENSIONS.md#11-signed-pre-key-rotation).

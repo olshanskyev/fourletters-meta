@@ -50,13 +50,15 @@
       },
       "publish": {
         "summary": "Client sends a control frame to the Hub",
-        "description": "These are the only frames the Hub acts on. Presence subscribe/unsubscribe manage which contacts' live state the client receives; typing announces the sender is typing; ping is an application-level liveness probe answered by a pong; call_signal relays an ephemeral, E2E-encrypted call signal to a call peer (never stored).",
+        "description": "Ephemeral control frames for presence, typing, liveness checks, and E2E-encrypted call signaling.",
         "operationId": "sendToHub",
         "message": {
           "oneOf": [
             { "$ref": "#/components/messages/PresenceSubscribeCommand" },
             { "$ref": "#/components/messages/PresenceUnsubscribeCommand" },
             { "$ref": "#/components/messages/TypingCommand" },
+            { "$ref": "#/components/messages/TypingGroupSubscribeCommand" },
+            { "$ref": "#/components/messages/TypingGroupUnsubscribeCommand" },
             { "$ref": "#/components/messages/PingCommand" },
             { "$ref": "#/components/messages/CallSignalCommand" }
           ]
@@ -99,8 +101,8 @@
       },
       "TypingEvent": {
         "name": "TypingEvent",
-        "title": "Contact Typing",
-        "summary": "A watched contact is typing",
+        "title": "Conversation Typing",
+        "summary": "A sender is typing to this recipient or in a watched group; group events include groupId",
         "payload": {
           "$ref": "./models.json#/components/schemas/TypingEvent"
         }
@@ -116,7 +118,7 @@
       "PresenceSubscribeCommand": {
         "name": "PresenceSubscribeCommand",
         "title": "Subscribe to Contact Presence",
-        "summary": "Start receiving a contact's online/typing state",
+        "summary": "Start receiving a contact's online/offline state",
         "payload": {
           "$ref": "./models.json#/components/schemas/PresenceSubscribeCommand"
         }
@@ -135,6 +137,22 @@
         "summary": "Announce the sender is typing in their active chat",
         "payload": {
           "$ref": "./models.json#/components/schemas/TypingCommand"
+        }
+      },
+      "TypingGroupSubscribeCommand": {
+        "name": "TypingGroupSubscribeCommand",
+        "title": "Subscribe to Group Typing",
+        "summary": "Watch typing in a group identified by groupId",
+        "payload": {
+          "$ref": "./models.json#/components/schemas/TypingGroupSubscribeCommand"
+        }
+      },
+      "TypingGroupUnsubscribeCommand": {
+        "name": "TypingGroupUnsubscribeCommand",
+        "title": "Unsubscribe from Group Typing",
+        "summary": "Stop watching typing in a group",
+        "payload": {
+          "$ref": "./models.json#/components/schemas/TypingGroupUnsubscribeCommand"
         }
       },
       "PingCommand": {

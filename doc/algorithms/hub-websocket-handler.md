@@ -6,7 +6,7 @@ For the surrounding context see [2.4 Message Sending & Receiving](../ARCHITECTUR
 
 ## Core Responsibilities
 1. **Registration:** on boot the Hub authenticates to the Server and receives its queue name `hub.queue.{hubId}`, then begins consuming. The Hub has **no permission to declare queues** — the Server provisions the queue (see [RabbitMQ topology](rabbitmq-exchange.md#object-ownership--lifecycle)).
-2. **Connection authorization & presence:** on a client WebSocket connect, the Hub validates the client's **Access JWT** (the short-lived access token, verified cryptographically via the Server's JWKS — no DB lookup) and then **binds `user.{id}`** (and `presence.{id}`, `call.{id}`) to its queue. On disconnect it **unbinds**. A binding therefore *is* live presence.
+2. **Connection authorization & presence:** on a client WebSocket connect, the Hub validates the client's **Access JWT** (verified via JWKS, no DB lookup) and binds `user.{id}`, `presence.{id}`, `call.{id}`, and `typing.user.{id}` to its queue. Disconnect releases those bindings and the user's presence/group subscriptions.
 3. **Live relay:** the Hub consumes a payload from its queue, looks up the local WebSocket session for the target user, and pushes the **opaque** payload over the socket.
 
 ## What the Hub does NOT do
@@ -33,12 +33,31 @@ To illustrate the Hub's content-agnostic role: when Bob reads a message, Bob's c
 
 ## Presence & Typing (inbound frames)
 
-Presence (online / typing) is one of the two exceptions to "receive-only" (the other is [call signaling](#call-signaling-inbound-frames)): the Hub relays a live presence signal peer-to-peer over `presence.exchange`, without the Server and without storage. It stays a relay — it holds only **transient subscription-routing state** (which local client watches which contact) and **persists nothing** (no presence values, no timestamps; "last seen" is deferred, see [FUTURE_EXTENSIONS.md §15](../FUTURE_EXTENSIONS.md#15-presence--last-seen-persistence--untrusted-hub-hardening)).
+Presence and typing are exceptions to receive-only message delivery, like
+[call signaling](#call-signaling-inbound-frames). They use `presence.exchange`, no Server lookup,
+and no storage. Persistent last seen is [deferred](../FUTURE_EXTENSIONS.md#151-persistent-last-seen).
 
-- **Inbound frames it now acts on:** `presence_subscribe`, `presence_unsubscribe`, `typing` (beyond the existing `ping`). The sender's id always comes from the connection's validated JWT, never from the frame.
-- **Online = routability, not a query.** `presence.exchange` is a **topic** exchange: a Hub binds `presence.{id}` for each user it *holds* and `watch.{id}` for each user a local client is *watching*. "Is X online?" is answered by a `mandatory` probe to `presence.{X}` — **routable ⇒ the owner Hub re-announces X online, returned ⇒ offline** — reusing the message offline-tripwire primitive.
-- **How it stays content-agnostic for messages:** presence and messages share the **same** `hub.queue.{hubId}`; the consumer routes by source exchange and key (`messages.exchange` → opaque message path; `presence.exchange` + `watch.{id}` → forward to local watchers; `presence.exchange` + `presence.{id}` → an inbound probe, re-announce that user online). Message handling is unchanged.
-- **On connect/disconnect** it additionally binds/unbinds `presence.{id}` and publishes an event to `watch.{id}` — the same lifecycle hooks that already bind/unbind `user.{id}` on `messages.exchange`.
+- **Presence:** `presence_subscribe` / `presence_unsubscribe` carry a contact `userId` and control
+    online/offline events on `watch.{id}`. A local session answers the initial snapshot immediately;
+    otherwise a mandatory probe to `presence.{id}` triggers an online re-announce or an offline return.
+- **Direct typing:** `typing` with `recipientId` publishes to `typing.user.{recipientId}`.
+    That route is bound automatically while the recipient is connected. The event contains
+    `type: typing` and the authenticated sender's `userId`; it has no `groupId`.
+- **Group typing:** `typing` with `groupId` publishes once to `typing.group.{groupId}`.
+    `typing_group_subscribe` / `typing_group_unsubscribe` carry `groupId`. The first local watcher
+    binds the route; the last watcher leaving unbinds it. Group events also contain `groupId`.
+- **Validation and lifetime:** typing commands require exactly one destination and a valid UUID.
+    Sender identity comes from the JWT. Publications are non-persistent with a 3-second expiry;
+    missing recipients/watchers cause a drop, not storage, push notification, or replay.
+- **Shared bookkeeping:** `PresenceService` indexes `watchers` by full routing key and keeps
+    `watchedBy` for disconnect cleanup. Presence and group typing reuse the same maps and lock.
+    Disconnect removes all watches; clients must re-send active subscriptions after reconnect.
+- **Consume:** `watch.*` goes to local presence watchers, `presence.*` triggers a probe response,
+    `typing.user.*` goes only to the recipient's session, and `typing.group.*` goes to local group
+    watchers. These deliveries are always acked-and-dropped, using the existing Hub queue.
+- **Privacy:** group typing subscriptions and publications have no membership checks. Indicators
+    are advisory, and metadata is visible to relays; see
+    [known limitations](../ARCHITECTURE.md#51-presence-and-typing-metadata).
 
 The full frame set, topic payloads, probe/snapshot mechanism, and security analysis live in [rabbitmq-exchange.md § Presence & Typing](rabbitmq-exchange.md#presence--typing-presenceexchange).
 
@@ -72,9 +91,9 @@ flowchart TD
         L1[Client opens WebSocket]
         L2{Validate JWT via JWKS}
         LX[Reject and close WS]
-        L3[Bind user.id, presence.id, call.id to hub queue]
+        L3[Bind user.id, presence.id, call.id, typing.user.id to hub queue]
         L4[Register local session: id to WS]
-        L5[On disconnect: unbind user.id, presence.id, call.id and drop session]
+        L5[On disconnect: unbind user.id, presence.id, call.id, typing.user.id; clean watches and drop session]
     end
 
     subgraph Relay [Live relay path]

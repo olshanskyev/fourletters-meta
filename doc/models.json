@@ -523,7 +523,7 @@
       "TypingEvent": {
         "type": "object",
         "required": ["type", "userId"],
-        "description": "WS push: a watched contact is currently typing.",
+        "description": "WS push: an authenticated user is typing. Direct events are delivered only to the recipient; group events carry groupId and are delivered to group typing watchers. No persistence or replay.",
         "properties": {
           "type": {
             "type": "string",
@@ -532,14 +532,19 @@
           "userId": {
             "type": "string",
             "format": "uuid",
-            "description": "The contact who is typing."
+            "description": "The sender who is typing, derived from the authenticated session."
+          },
+          "groupId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The group being typed in. Absent for direct typing."
           }
         }
       },
       "PresenceSubscribeCommand": {
         "type": "object",
         "required": ["type", "userId"],
-        "description": "Client -> Hub: start receiving a contact's online/typing state.",
+        "description": "Client -> Hub: start receiving a contact's online/offline state.",
         "properties": {
           "type": {
             "type": "string",
@@ -571,11 +576,51 @@
       "TypingCommand": {
         "type": "object",
         "required": ["type"],
-        "description": "Client -> Hub: 'I am typing in my active chat.' The Hub derives the sender id from the authenticated session and relays it to that user's watchers.",
+        "description": "Client -> Hub: announce typing to exactly one destination: recipientId for a direct chat or groupId for a group. The Hub validates destination exclusivity and derives the sender from authentication.",
         "properties": {
           "type": {
             "type": "string",
             "enum": ["typing"]
+          },
+          "recipientId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Direct recipient; routed to typing.user.<recipientId>."
+          },
+          "groupId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Group destination; routed to typing.group.<groupId>."
+          }
+        }
+      },
+      "TypingGroupSubscribeCommand": {
+        "type": "object",
+        "required": ["type", "groupId"],
+        "description": "Client -> Hub: watch typing in a group.",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["typing_group_subscribe"]
+          },
+          "groupId": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
+      "TypingGroupUnsubscribeCommand": {
+        "type": "object",
+        "required": ["type", "groupId"],
+        "description": "Client -> Hub: stop watching group typing.",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["typing_group_unsubscribe"]
+          },
+          "groupId": {
+            "type": "string",
+            "format": "uuid"
           }
         }
       },
