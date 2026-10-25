@@ -71,6 +71,8 @@ services:
       - PUSH_VAPID_SUBJECT=${PUSH_VAPID_SUBJECT:-mailto:olshanskyev@gmail.com}
       # Client telemetry JSON-lines file, written into the persistent volume below.
       - TELEMETRY_LOG_FILE=/var/log/telemetry/client-telemetry.jsonl
+      # Shared message size budget (server cap, hub send buffer, gui photo cap + nginx body limit).
+      - MESSAGE_MAX_PAYLOAD_BYTES=${MESSAGE_MAX_PAYLOAD_BYTES:-4194304}
     depends_on:
       - db
       - rabbitmq
@@ -107,6 +109,7 @@ services:
       - JWT_PUBLIC_KEY_URL=http://server:8080/server/api/v1/auth/jwks
       - HUB_REGISTRATION_URL=http://server:8080/server/api/v1/hubs/register
       - HUB_REGISTRATION_TOKEN=${HUB_REGISTRATION_SECRET}
+      - MESSAGE_MAX_PAYLOAD_BYTES=${MESSAGE_MAX_PAYLOAD_BYTES:-4194304}
     depends_on:
       - server
       - rabbitmq
@@ -138,6 +141,8 @@ services:
       - CERT_PATH=${CERT_PATH:-}
       # Comma-separated ICE server URLs handed to the PWA for calls.
       - STUN_URLS=${STUN_URLS:-stun:${HOST:-localhost}:3478}
+      # Sizes the photo cap (config.json) and the nginx body limit for message sends.
+      - MESSAGE_MAX_PAYLOAD_BYTES=${MESSAGE_MAX_PAYLOAD_BYTES:-4194304}
     ports:
       - "80:80"
       - "443:443"
