@@ -176,3 +176,7 @@ flowchart TD
 - **Call offers (`hint: call`):** the push reads "Incoming call from X", uses its own notification tag (it never merges with message notifications), high urgency, and a Web Push TTL equal to the offer TTL (60 s), so a device that comes online later is never shown a stale incoming call.
 - **Single device:** one subscription per user (`push_subscriptions` keyed by `user_id`, upserted on `POST /push/subscribe`). A stale endpoint returning `404`/`410` is pruned on send; a new login on another device replaces the row.
 
+## Reactions
+
+A reaction is an ordinary message (own `messageId`, `hint: reaction`) with a **plaintext** payload `0.{"kind":"reaction","target":<messageId>,"emoji":<emoji or ''>,"ts":<epochMs>}`; an empty emoji removes the reaction. It follows the normal lifecycle: hot/cold inbox, group fan-out (the Server keeps the `reaction` hint for groups), `delivered` receipt. The push reads "New reaction" and is debounced like a chat message. Clients keep one reaction per reactor per target message; the newest `ts` wins.
+
