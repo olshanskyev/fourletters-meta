@@ -270,4 +270,8 @@ A member shares its Sender Key with a peer via a **Sender Key Distribution Messa
 
 > **Security properties.** Per-message confidentiality and per-sender authenticity (signed). Forward secrecy per sender stream (ratcheting chain key). Backward secrecy across member removal via the epoch bump. Cost is O(1) ciphertext per message and a single stored copy, plus O(new-members) one-time SKDMs.
 
+## 7. Reactions (not encrypted)
+
+Reactions are sent as plaintext messages (sessionType `0`), so the Server can see who reacted with which emoji to which `messageId`, but never the message content. The reactor identity is the Server-stamped `senderId`. Clients accept only the fixed emoji set and only for a locally known message in the same conversation.
+
 

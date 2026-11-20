@@ -15,8 +15,8 @@
       },
       "MessageHint": {
         "type": "string",
-        "enum": ["message", "call"],
-        "description": "Plaintext delivery hint set by the sender. The Server uses it only to choose the push notification wording and timing: 'message' = a chat message (default when omitted); 'call' = a call offer."
+        "enum": ["message", "call", "reaction"],
+        "description": "Plaintext delivery hint set by the sender. The Server uses it only to choose the push notification wording and timing: 'message' = a chat message (default when omitted); 'call' = a call offer; 'reaction' = a message reaction."
       },
       "RefreshError": {
         "type": "object",
@@ -145,7 +145,7 @@
           },
           "payload": {
             "type": "string",
-            "description": "E2E encrypted ciphertext. Format '<sessionType>.<bodyBase64>'. sessionType is 1 (WhisperMessage, established pairwise session) or 3 (PreKeyWhisperMessage, establishes the pairwise session) for a 1:1 payload, or 4 (SenderKeyMessage) for a group payload encrypted once with the sender's per-group Sender Key."
+            "description": "E2E encrypted ciphertext. Format '<sessionType>.<bodyBase64>'. sessionType is 1 (WhisperMessage, established pairwise session) or 3 (PreKeyWhisperMessage, establishes the pairwise session) for a 1:1 payload, or 4 (SenderKeyMessage) for a group payload encrypted once with the sender's per-group Sender Key. sessionType 0 is a plaintext reaction: '0.{\"kind\":\"reaction\",\"target\":<messageId>,\"emoji\":<emoji or ''>,\"ts\":<epochMs>}'."
           },
           "groupId": {
             "type": "string",

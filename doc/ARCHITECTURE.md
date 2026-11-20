@@ -431,3 +431,11 @@ message content or weaken the separate message-authenticity and delivery guarant
     This extends the exposure window for initial sessions established without a one-time pre-key,
     not for established Double Ratchet sessions.
     See [deferred signed-pre-key rotation](FUTURE_EXTENSIONS.md#11-signed-pre-key-rotation).
+- **Reactions.** Reactions are plaintext to the Server and Hub (who reacted, which emoji, which
+    `messageId`). They link to a message only by its `messageId`, so on a new device they are
+    dropped for messages from before the device change, and they do not link for group messages
+    received via the undecryptable re-delivery path, which arrive under a fresh wire id. The
+    sender stores its own reaction before the request completes and reverts it only on a reported
+    failure, so closing the app mid-request can leave it shown locally but never sent.
+    See [reactions](algorithms/messages-lifecycle.md#reactions) and
+    [reaction confidentiality](MESSAGE_SECURITY.md#7-reactions-not-encrypted).
