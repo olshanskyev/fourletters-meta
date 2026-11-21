@@ -272,6 +272,6 @@ A member shares its Sender Key with a peer via a **Sender Key Distribution Messa
 
 ## 7. Reactions (not encrypted)
 
-Reactions are sent as plaintext messages (sessionType `0`), so the Server can see who reacted with which emoji to which `messageId`, but never the message content. The reactor identity is the Server-stamped `senderId`. Clients accept only the fixed emoji set and only for a locally known message in the same conversation.
+Reactions are sent as plaintext messages (sessionType `0`), so the Server can see who reacted with which emoji to which `messageId` and the target message's author (`notifyId`, used to push only them), but never the message content. The reactor identity is the Server-stamped `senderId`. Clients accept only the fixed emoji set and only for a locally known message in the same conversation.
 
 
