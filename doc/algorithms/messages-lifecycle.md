@@ -178,5 +178,5 @@ flowchart TD
 
 ## Reactions
 
-A reaction is an ordinary message (own `messageId`, `hint: reaction`) with a **plaintext** payload `0.{"kind":"reaction","target":<messageId>,"emoji":<emoji or ''>,"ts":<epochMs>}`; an empty emoji removes the reaction. It follows the normal lifecycle: hot/cold inbox, group fan-out (the Server keeps the `reaction` hint for groups), `delivered` receipt. The push reads "New reaction" and is debounced like a chat message. Clients keep one reaction per reactor per target message; the newest `ts` wins.
+A reaction is an ordinary message (own `messageId`, `hint: reaction`) with a **plaintext** payload `0.{"kind":"reaction","target":<messageId>,"emoji":<emoji or ''>,"ts":<epochMs>,"notifyId":<target author>}`; an empty emoji removes the reaction. It follows the normal lifecycle: hot/cold inbox, group fan-out (the Server keeps the `reaction` hint for groups), `delivered` receipt. Only the target message's author (`notifyId`, omitted for a reaction to one's own message) is pushed, with the body "Reacted <emoji> to your message" (allow-listed emoji only; removals are not pushed); it is debounced like a chat message. Clients keep one reaction per reactor per target message; the newest `ts` wins.
 
